@@ -30,12 +30,15 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/record"
 	testclock "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	budgetv1alpha1 "github.com/zxuhan/gpu-k8s-operator/api/v1alpha1"
+	"github.com/zxuhan/gpu-k8s-operator/internal/enforcement"
 )
 
 // reconcileT0 is the pinned "now" every reconciler spec evaluates against.
@@ -43,8 +46,13 @@ import (
 // numbers rather than floating-point windows.
 var reconcileT0 = time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
 
-// nolint:unparam // windowHours is always 24 today, but Phase 4 enforcement tests vary it.
+// nolint:unparam // windowHours is always 24 today; Phase 6 bench specs will exercise shorter windows.
 func newBudget(name, namespace string, gpuHours string, windowHours int32, team string) *budgetv1alpha1.GPUWorkloadBudget {
+	return newBudgetWithAction(name, namespace, gpuHours, windowHours, team, budgetv1alpha1.ActionAlertOnly, 30)
+}
+
+// nolint:unparam // windowHours is always 24 today; Phase 6 bench specs will exercise shorter windows.
+func newBudgetWithAction(name, namespace, gpuHours string, windowHours int32, team string, action budgetv1alpha1.EnforcementAction, graceSeconds int32) *budgetv1alpha1.GPUWorkloadBudget {
 	return &budgetv1alpha1.GPUWorkloadBudget{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: budgetv1alpha1.GPUWorkloadBudgetSpec{
@@ -54,8 +62,8 @@ func newBudget(name, namespace string, gpuHours string, windowHours int32, team 
 				WindowHours: windowHours,
 			},
 			Enforcement: budgetv1alpha1.Enforcement{
-				Action:             budgetv1alpha1.ActionAlertOnly,
-				GracePeriodSeconds: 30,
+				Action:             action,
+				GracePeriodSeconds: graceSeconds,
 			},
 			GPUResourceName: corev1.ResourceName("nvidia.com/gpu"),
 		},
@@ -113,6 +121,7 @@ var _ = Describe("GPUWorkloadBudget Controller", func() {
 		namespace  string
 		budgetKey  types.NamespacedName
 		reconciler *GPUWorkloadBudgetReconciler
+		recorder   *record.FakeRecorder
 	)
 
 	// Each spec runs in its own fresh namespace. envtest keeps state
@@ -123,10 +132,20 @@ var _ = Describe("GPUWorkloadBudget Controller", func() {
 		namespace = fmt.Sprintf("recon-%d", time.Now().UnixNano())
 		Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}})).To(Succeed())
 
+		// Typed clientset is needed for the policy/v1 Eviction subresource;
+		// the controller-runtime client can't speak subresources.
+		clientset, err := kubernetes.NewForConfig(cfg)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Generous buffer; specs assert on event text without blocking.
+		recorder = record.NewFakeRecorder(32)
+
 		reconciler = &GPUWorkloadBudgetReconciler{
-			Client: k8sClient,
-			Scheme: k8sClient.Scheme(),
-			Clock:  testclock.NewFakePassiveClock(reconcileT0),
+			Client:    k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			Clock:     testclock.NewFakePassiveClock(reconcileT0),
+			Clientset: clientset,
+			Recorder:  recorder,
 		}
 	})
 
@@ -237,5 +256,116 @@ var _ = Describe("GPUWorkloadBudget Controller", func() {
 			NamespacedName: types.NamespacedName{Name: "missing", Namespace: namespace},
 		})
 		Expect(err).NotTo(HaveOccurred())
+	})
+
+	// reconcileTwice is the pattern used by every enforcement spec: the
+	// first call sees Over and stamps the QuotaExceeded condition's
+	// LastTransitionTime, which starts the grace clock; the second call
+	// — with the reconciler's clock advanced past grace — actually
+	// invokes the enforcer. Factoring it out keeps each spec focused on
+	// what it's asserting, not on the grace-period machinery.
+	reconcileTwice := func(key types.NamespacedName, graceSeconds int32) {
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+		reconciler.Clock = testclock.NewFakePassiveClock(reconcileT0.Add(time.Duration(graceSeconds+1) * time.Second))
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+	}
+
+	It("holds enforcement during the grace period and fires after it elapses", func() {
+		const grace int32 = 60
+		budget := newBudgetWithAction("grace-test", namespace, "1", 24, "vision", budgetv1alpha1.ActionAlertOnly, grace)
+		Expect(k8sClient.Create(ctx, budget)).To(Succeed())
+		budgetKey = client.ObjectKeyFromObject(budget)
+
+		// 2 GPUs × 1h = 2 GPU-hours, quota is 1 → Over.
+		createRunningGPUPod(ctx, k8sClient, namespace, "pod-a", "vision", 2, 1)
+
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: budgetKey})
+		Expect(err).NotTo(HaveOccurred())
+
+		got := &budgetv1alpha1.GPUWorkloadBudget{}
+		Expect(k8sClient.Get(ctx, budgetKey, got)).To(Succeed())
+		Expect(got.Status.LastEnforcementAt).To(BeNil(), "first Over reconcile is inside grace")
+
+		// Advance clock past grace and re-reconcile — enforcement fires.
+		reconciler.Clock = testclock.NewFakePassiveClock(reconcileT0.Add(time.Duration(grace+1) * time.Second))
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: budgetKey})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(k8sClient.Get(ctx, budgetKey, got)).To(Succeed())
+		Expect(got.Status.LastEnforcementAt).NotTo(BeNil(), "enforcement must fire once grace elapses")
+	})
+
+	It("AlertOnly emits an event and leaves the pod untouched", func() {
+		const grace int32 = 30
+		budget := newBudgetWithAction("alerter", namespace, "1", 24, "vision", budgetv1alpha1.ActionAlertOnly, grace)
+		Expect(k8sClient.Create(ctx, budget)).To(Succeed())
+		budgetKey = client.ObjectKeyFromObject(budget)
+
+		pod := createRunningGPUPod(ctx, k8sClient, namespace, "pod-a", "vision", 2, 1)
+
+		reconcileTwice(budgetKey, grace)
+
+		// Pod must be unchanged — no deletion, no annotations.
+		gotPod := &corev1.Pod{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), gotPod)).To(Succeed())
+		Expect(gotPod.DeletionTimestamp).To(BeNil())
+		Expect(gotPod.Annotations).NotTo(HaveKey(enforcement.AnnotationPausedAt))
+
+		got := &budgetv1alpha1.GPUWorkloadBudget{}
+		Expect(k8sClient.Get(ctx, budgetKey, got)).To(Succeed())
+		Expect(got.Status.LastEnforcementAt).NotTo(BeNil())
+
+		Eventually(recorder.Events, time.Second, 10*time.Millisecond).Should(Receive(ContainSubstring("QuotaExceeded")))
+	})
+
+	It("Pause stamps only the worst offender with the paused-at annotation", func() {
+		const grace int32 = 30
+		budget := newBudgetWithAction("pauser", namespace, "1", 24, "vision", budgetv1alpha1.ActionPause, grace)
+		Expect(k8sClient.Create(ctx, budget)).To(Succeed())
+		budgetKey = client.ObjectKeyFromObject(budget)
+
+		little := createRunningGPUPod(ctx, k8sClient, namespace, "pod-small", "vision", 1, 1)
+		big := createRunningGPUPod(ctx, k8sClient, namespace, "pod-big", "vision", 4, 1)
+
+		reconcileTwice(budgetKey, grace)
+
+		gotBig := &corev1.Pod{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(big), gotBig)).To(Succeed())
+		Expect(gotBig.Annotations).To(HaveKey(enforcement.AnnotationPausedAt))
+		Expect(gotBig.Annotations).To(HaveKeyWithValue(enforcement.AnnotationPausedBy, namespace+"/pauser"))
+
+		// The non-offender must NOT be paused — only the top contributor
+		// is targeted per tick.
+		gotLittle := &corev1.Pod{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(little), gotLittle)).To(Succeed())
+		Expect(gotLittle.Annotations).NotTo(HaveKey(enforcement.AnnotationPausedAt))
+	})
+
+	It("Evict deletes the worst offender via the eviction subresource", func() {
+		const grace int32 = 30
+		budget := newBudgetWithAction("evictor", namespace, "1", 24, "vision", budgetv1alpha1.ActionEvict, grace)
+		Expect(k8sClient.Create(ctx, budget)).To(Succeed())
+		budgetKey = client.ObjectKeyFromObject(budget)
+
+		victim := createRunningGPUPod(ctx, k8sClient, namespace, "pod-a", "vision", 2, 1)
+
+		reconcileTwice(budgetKey, grace)
+
+		// envtest has no kubelet, so an evicted pod sticks around with
+		// a DeletionTimestamp rather than vanishing. That's enough to
+		// verify the Eviction subresource reached the apiserver.
+		gotPod := &corev1.Pod{}
+		Eventually(func() bool {
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(victim), gotPod); err != nil {
+				return apierrors.IsNotFound(err)
+			}
+			return gotPod.DeletionTimestamp != nil
+		}, time.Second, 10*time.Millisecond).Should(BeTrue())
+
+		got := &budgetv1alpha1.GPUWorkloadBudget{}
+		Expect(k8sClient.Get(ctx, budgetKey, got)).To(Succeed())
+		Expect(got.Status.LastEnforcementAt).NotTo(BeNil())
 	})
 })

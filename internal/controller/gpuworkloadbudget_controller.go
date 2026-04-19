@@ -29,6 +29,8 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,6 +41,7 @@ import (
 
 	budgetv1alpha1 "github.com/zxuhan/gpu-k8s-operator/api/v1alpha1"
 	"github.com/zxuhan/gpu-k8s-operator/internal/accounting"
+	"github.com/zxuhan/gpu-k8s-operator/internal/enforcement"
 )
 
 const (
@@ -51,9 +54,15 @@ const (
 	// defaultRequeueInterval drives the rolling-window refresh when no
 	// pod event arrives. 30s is the same cadence the README claims the
 	// scrape runs at, keeping "what Prom sees" and "what the CR says"
-	// within one tick of each other. Enforcement (Phase 4) will shorten
-	// this once Over flips.
+	// within one tick of each other.
 	defaultRequeueInterval = 30 * time.Second
+
+	// overBudgetRequeueInterval is the tighter cadence used while the
+	// budget is over quota. Grace-period expiry is evaluated on every
+	// reconcile; 10s balances responsiveness against API server load —
+	// eviction delays above that are indistinguishable from noise for a
+	// quota whose window is measured in hours.
+	overBudgetRequeueInterval = 10 * time.Second
 )
 
 // GPUWorkloadBudgetReconciler reconciles a GPUWorkloadBudget object.
@@ -63,12 +72,20 @@ type GPUWorkloadBudgetReconciler struct {
 	// Clock is overridable so envtest specs can pin "now" to a
 	// deterministic instant. Production wires in clock.RealClock.
 	Clock clock.PassiveClock
+	// Clientset is the typed kubernetes client used by the Evict
+	// enforcer to submit the policy/v1 Eviction subresource. Required
+	// when spec.enforcement.action = Evict; nil is tolerated otherwise.
+	Clientset kubernetes.Interface
+	// Recorder emits Kubernetes Events against the GPUWorkloadBudget
+	// when enforcement fires. Required when enforcement is enabled.
+	Recorder record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=budget.zxuhan.dev,resources=gpuworkloadbudgets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=budget.zxuhan.dev,resources=gpuworkloadbudgets/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=budget.zxuhan.dev,resources=gpuworkloadbudgets/finalizers,verbs=update
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;patch
+// +kubebuilder:rbac:groups=core,resources=pods/eviction,verbs=create
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 // Reconcile evaluates a single GPUWorkloadBudget against the live pod
@@ -132,11 +149,19 @@ func (r *GPUWorkloadBudgetReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		Quota:  budget.Spec.Quota.GPUHours.AsApproximateFloat64(),
 	}.Compute(now, accPods)
 
-	if err := r.writeStatus(ctx, budget, result); err != nil {
+	if err := r.writeStatus(ctx, budget, result, now); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	r.publishMetrics(budget, result)
+
+	if result.Over {
+		if err := r.maybeEnforce(ctx, budget, pods.Items, now); err != nil {
+			log.Error(err, "enforcement failed")
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: overBudgetRequeueInterval}, nil
+	}
 
 	return ctrl.Result{RequeueAfter: defaultRequeueInterval}, nil
 }
@@ -159,8 +184,13 @@ func (r *GPUWorkloadBudgetReconciler) finalize(ctx context.Context, budget *budg
 // writeStatus maps the accounting Result onto status fields and patches
 // the subresource. A Patch (rather than Update) avoids spurious 409s
 // when a parallel reconcile races to update the same object.
-func (r *GPUWorkloadBudgetReconciler) writeStatus(ctx context.Context, budget *budgetv1alpha1.GPUWorkloadBudget, result accounting.Result) error {
+//
+// now is threaded in so the LastTransitionTime on condition flips is
+// driven by the overridable clock — envtest specs assert exact
+// grace-period expiry by comparing LTT to the pinned reconcileT0.
+func (r *GPUWorkloadBudgetReconciler) writeStatus(ctx context.Context, budget *budgetv1alpha1.GPUWorkloadBudget, result accounting.Result, now time.Time) error {
 	patch := client.MergeFrom(budget.DeepCopy())
+	ltt := metav1.NewTime(now)
 
 	budget.Status.ConsumedGPUHours = gpuHoursToQuantity(result.Consumed)
 	budget.Status.RemainingGPUHours = gpuHoursToQuantity(result.Remaining)
@@ -171,10 +201,11 @@ func (r *GPUWorkloadBudgetReconciler) writeStatus(ctx context.Context, budget *b
 	budget.Status.ObservedGeneration = budget.Generation
 
 	meta.SetStatusCondition(&budget.Status.Conditions, metav1.Condition{
-		Type:    budgetv1alpha1.ConditionReady,
-		Status:  metav1.ConditionTrue,
-		Reason:  "Reconciled",
-		Message: "Accounting computed successfully.",
+		Type:               budgetv1alpha1.ConditionReady,
+		Status:             metav1.ConditionTrue,
+		Reason:             "Reconciled",
+		Message:            "Accounting computed successfully.",
+		LastTransitionTime: ltt,
 	})
 	quotaExceededStatus := metav1.ConditionFalse
 	quotaExceededReason := "WithinBudget"
@@ -185,17 +216,19 @@ func (r *GPUWorkloadBudgetReconciler) writeStatus(ctx context.Context, budget *b
 		quotaExceededMessage = fmt.Sprintf("Consumed %.3f GPU-hours meets or exceeds quota.", result.Consumed)
 	}
 	meta.SetStatusCondition(&budget.Status.Conditions, metav1.Condition{
-		Type:    budgetv1alpha1.ConditionQuotaExceeded,
-		Status:  quotaExceededStatus,
-		Reason:  quotaExceededReason,
-		Message: quotaExceededMessage,
+		Type:               budgetv1alpha1.ConditionQuotaExceeded,
+		Status:             quotaExceededStatus,
+		Reason:             quotaExceededReason,
+		Message:            quotaExceededMessage,
+		LastTransitionTime: ltt,
 	})
 	// A successful accounting cycle clears any prior Degraded flag.
 	meta.SetStatusCondition(&budget.Status.Conditions, metav1.Condition{
-		Type:    budgetv1alpha1.ConditionDegraded,
-		Status:  metav1.ConditionFalse,
-		Reason:  "ReconcileSucceeded",
-		Message: "Controller reconciled the budget without error.",
+		Type:               budgetv1alpha1.ConditionDegraded,
+		Status:             metav1.ConditionFalse,
+		Reason:             "ReconcileSucceeded",
+		Message:            "Controller reconciled the budget without error.",
+		LastTransitionTime: ltt,
 	})
 
 	if err := r.Status().Patch(ctx, budget, patch); err != nil {
@@ -228,6 +261,91 @@ func (r *GPUWorkloadBudgetReconciler) markDegradedAndRequeue(ctx context.Context
 		return ctrl.Result{}, fmt.Errorf("patch degraded status: %w", err)
 	}
 	return ctrl.Result{RequeueAfter: defaultRequeueInterval}, nil
+}
+
+// maybeEnforce is the post-status-write enforcement gate. It decides
+// whether the operator acts this tick based on three inputs:
+//
+//  1. The QuotaExceeded condition must be True — writeStatus just set
+//     it, so result.Over alone is enough; the condition lookup guards
+//     against a future refactor.
+//  2. now must be at-or-past LastTransitionTime + gracePeriodSeconds.
+//     Grace derives from the condition's LTT, not from a separate
+//     status field — that way pod churn that drops us briefly below
+//     quota and back above it legitimately re-starts the clock.
+//  3. A worst-offender pod must exist among the matched set. Pending
+//     pods, already-terminating pods, and pods with zero window
+//     contribution are filtered out.
+//
+// When all three hold, the configured Enforcer runs. Successful
+// invocations bump the enforcement counter and stamp
+// status.LastEnforcementAt — even AlertOnly, which does not mutate a
+// pod, records the attempt so operators can audit cadence.
+func (r *GPUWorkloadBudgetReconciler) maybeEnforce(ctx context.Context, budget *budgetv1alpha1.GPUWorkloadBudget, pods []corev1.Pod, now time.Time) error {
+	cond := meta.FindStatusCondition(budget.Status.Conditions, budgetv1alpha1.ConditionQuotaExceeded)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		return nil
+	}
+	grace := time.Duration(budget.Spec.Enforcement.GracePeriodSeconds) * time.Second
+	if now.Before(cond.LastTransitionTime.Add(grace)) {
+		return nil
+	}
+
+	window := time.Duration(budget.Spec.Quota.WindowHours) * time.Hour
+	from := now.Add(-window)
+	gpuRes := gpuResourceName(budget)
+
+	offender := pickWorstOffender(pods, gpuRes, from, now)
+	if offender == nil {
+		return nil
+	}
+
+	enforcer := enforcement.New(budget.Spec.Enforcement.Action, r.Client, r.Clientset, r.Recorder)
+	outcome, err := enforcer.Enforce(ctx, budget, offender, now)
+	if err != nil {
+		return fmt.Errorf("enforce %s: %w", budget.Spec.Enforcement.Action, err)
+	}
+
+	enforcementActionsTotal.WithLabelValues(budget.Namespace, budget.Name, string(outcome.Action)).Inc()
+
+	patch := client.MergeFrom(budget.DeepCopy())
+	t := metav1.NewTime(now)
+	budget.Status.LastEnforcementAt = &t
+	if err := r.Status().Patch(ctx, budget, patch); err != nil {
+		return fmt.Errorf("patch last enforcement time: %w", err)
+	}
+	return nil
+}
+
+// pickWorstOffender returns the pod that contributed the most GPU-hours
+// to the current window, breaking ties alphabetically on pod name for
+// determinism (so envtest assertions and human muscle memory agree on
+// "which pod will the operator evict next?"). Pods with a
+// DeletionTimestamp are skipped — enforcing against a pod that's
+// already terminating would waste an event, and the actual consumption
+// will resolve naturally as kubelet finishes teardown.
+func pickWorstOffender(pods []corev1.Pod, gpuRes corev1.ResourceName, from, now time.Time) *corev1.Pod {
+	var best *corev1.Pod
+	var bestHours float64
+	for i := range pods {
+		p := &pods[i]
+		if p.DeletionTimestamp != nil {
+			continue
+		}
+		accPod, ok := podToAccounting(p, gpuRes)
+		if !ok {
+			continue
+		}
+		hours := accounting.WindowUsage(accPod, from, now)
+		if hours <= 0 {
+			continue
+		}
+		if best == nil || hours > bestHours || (hours == bestHours && p.Name < best.Name) {
+			best = p
+			bestHours = hours
+		}
+	}
+	return best
 }
 
 // publishMetrics mirrors the Result onto the Prometheus gauges.

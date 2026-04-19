@@ -18,7 +18,14 @@ rules:
   verbs:
   - get
   - list
+  - patch
   - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/eviction
+  verbs:
+  - create
 - apiGroups:
   - budget.zxuhan.dev
   resources:

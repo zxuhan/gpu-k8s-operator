@@ -27,6 +27,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -180,10 +181,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The Evict enforcer needs a typed clientset — the controller-runtime
+	// client can't submit subresources like pods/eviction. Build it from
+	// the manager's shared rest.Config so token rotation is inherited.
+	clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		setupLog.Error(err, "Failed to build typed kubernetes clientset")
+		os.Exit(1)
+	}
 	if err := (&controller.GPUWorkloadBudgetReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Clock:  clock.RealClock{},
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Clock:     clock.RealClock{},
+		Clientset: clientset,
+		Recorder:  mgr.GetEventRecorderFor("gwb-operator"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "GPUWorkloadBudget")
 		os.Exit(1)
