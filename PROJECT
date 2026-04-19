@@ -8,4 +8,17 @@ layout:
 - go.kubebuilder.io/v4
 projectName: gpu-k8s-operator
 repo: github.com/zxuhan/gpu-k8s-operator
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: zxuhan.dev
+  group: budget
+  kind: GPUWorkloadBudget
+  path: github.com/zxuhan/gpu-k8s-operator/api/v1alpha1
+  version: v1alpha1
+  webhooks:
+    validation: true
+    webhookVersion: v1
 version: "3"
