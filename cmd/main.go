@@ -189,12 +189,18 @@ func main() {
 		setupLog.Error(err, "Failed to build typed kubernetes clientset")
 		os.Exit(1)
 	}
+	// The legacy record.EventRecorder API (Event with type/reason/message) is
+	// simpler than the new events.EventRecorder (Eventf with regarding/
+	// related/action/note) and is what the enforcement package's signature
+	// expects. controller-runtime v0.23 supports both; migrating is a
+	// separate piece of work.
+	recorder := mgr.GetEventRecorderFor("gwb-operator") // nolint:staticcheck
 	if err := (&controller.GPUWorkloadBudgetReconciler{
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
 		Clock:     clock.RealClock{},
 		Clientset: clientset,
-		Recorder:  mgr.GetEventRecorderFor("gwb-operator"),
+		Recorder:  recorder,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "GPUWorkloadBudget")
 		os.Exit(1)
