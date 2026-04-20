@@ -6,4 +6,21 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: gpuworkloadbudget-sample
 spec:
-  # TODO(user): Add fields here
+  selector:
+    matchLabels:
+      workload: training
+  quota:
+    # 8 GPU-hours per rolling window — enough to let a 4-GPU job run
+    # for two hours before enforcement trips.
+    gpuHours: "8"
+    windowHours: 24
+  enforcement:
+    # AlertOnly is the safest default for first-time users: over-quota
+    # emits a Warning event but leaves pods untouched. Switch to Evict
+    # or Pause once dashboards look correct.
+    action: AlertOnly
+    gracePeriodSeconds: 60
+  # Defaults to nvidia.com/gpu if omitted. Set to "cpu" (or any other
+  # resource name advertised by kubelet) to exercise the accounting
+  # engine on clusters without physical GPUs.
+  # gpuResourceName: "nvidia.com/gpu"
