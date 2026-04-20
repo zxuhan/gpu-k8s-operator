@@ -205,7 +205,7 @@ func declareGWBLifecycleContext() {
 				SelectorApp: "gwb-e2e-alert-worker",
 				// Tiny quota + cpu accounting + grace=5s means we blow
 				// through the budget within seconds once the pod is
-				// Running. See the math in CLAUDE.md / Phase 5 notes.
+				// Running.
 				GPUHours:     "1m",
 				WindowHours:  1,
 				GPUResource:  "cpu",
