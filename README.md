@@ -5,10 +5,26 @@ consumption for pods matching a label selector against a rolling-window
 quota, and enforces that quota via eviction, pause annotations, or
 alert-only mode.
 
-The operator is built around the `GPUWorkloadBudget` CRD (group
-`budget.zxuhan.dev`, version `v1alpha1`). Accounting is derived from
-the API-server view on every reconcile, so a restart recovers from
-cluster state rather than from a cache —
+![demo](docs/media/demo.gif)
+
+*Scene A: 8 pods launch against a quota deliberately set to be
+crossable in seconds; `CONSUMED` climbs past it, `TRACKED=8`. Scene B:
+the operator pod is deleted — when the new pod comes up, the
+controller-runtime informer rebuilds from the API-server view and the
+same 8 pods are re-observed. State wasn't persisted and none was lost;
+the counter keeps climbing. Regenerate with `make demo`.*
+
+## Why this matters
+
+Cumulative GPU-hour budgets are the quota primitive AI-cloud platforms
+use to keep shared fleets fair and predictable: teams get an allowance
+per window, workloads stay fungible across nodes, and billing stays
+out of the hot path. This operator is a self-contained implementation
+of that control plane — rolling-window accounting, grace-period
+enforcement, stateless restart recovery — all driven by a single CRD
+(`GPUWorkloadBudget`, group `budget.zxuhan.dev`, version `v1alpha1`).
+Accounting is derived from the API-server view on every reconcile, so
+a restart recovers from cluster state rather than from a cache;
 [docs/accounting-model.md](docs/accounting-model.md) explains the
 bounded-error guarantees.
 
@@ -59,6 +75,19 @@ kubectl get gwb team-a -w
 ```
 
 ## How it works
+
+```mermaid
+flowchart LR
+    P[Pod events<br/>API server] --> R[Reconciler<br/>internal/controller]
+    R --> A[Accounting engine<br/>internal/accounting<br/>pure Go, k8s-free]
+    A --> R
+    R --> S[.status write<br/>Ready / QuotaExceeded /<br/>Degraded conditions]
+    R --> D[Enforcement dispatcher<br/>internal/enforcement]
+    D --> E1[Evict<br/>policy/v1.Eviction]
+    D --> E2[Pause<br/>annotation stamp]
+    D --> E3[AlertOnly<br/>Event only]
+    R --> M[Prometheus metrics<br/>consumed / remaining /<br/>tracked_pods]
+```
 
 Three packages, separated so each is independently testable:
 
@@ -133,25 +162,23 @@ fraction of a second after pod-create. See
 [docs/accounting-model.md](docs/accounting-model.md) for the formula.
 
 **Restart correctness** — same workload, runtime bumped to 60s so pods
-are still Running when we snapshot. Operator pod deleted at t=15s and
-allowed to reconcile for 15s before the post snapshot:
+are still Running when we snapshot. Operator pod deleted at t=15s;
+post snapshot at t=120s (`CHAOS_POST_SECONDS=120`):
 
-| Phase | Elapsed | Reported | Expected | Accuracy | Tracked pods |
+| Phase | Elapsed | Tracked pods | Reported | Expected | Accuracy |
 |---|---|---|---|---|---|
-| pre-restart  | 15s | 0.0120 | 0.0174 | 0.69 | 50 |
-| post-restart | 45s | 0.0310 | 0.0591 | 0.52 | 50 |
+| pre-restart  | 15s  | **50 / 50** | 0.0120 | 0.0174 | 0.69 |
+| post-restart | 120s | **50 / 50** | 0.0830 | 0.0833 | **0.996** |
 
-`tracked_pods=50` before and after confirms the stateless-recovery
-claim: controller-runtime's informer cache rebuilds from the
-API-server view on startup, so every pod is re-observed. The headline
-accuracy gap here is not lost accounting — it's reconcile cadence.
-The post-restart snapshot lands one reconcile after the operator comes
-back up, before the engine has re-summed all 50 pods' full elapsed
-runtime. By contrast the `make bench` scenario above runs to pod
-completion, which gives the engine multiple reconciles to converge.
-Raising `CHAOS_POST_SECONDS` closes the gap at the cost of a longer
-run; tuning it is documented in
-[docs/benchmark-methodology.md](docs/benchmark-methodology.md).
+The headline is `tracked_pods = 50` on both sides of the restart: when
+the new operator pod comes up, controller-runtime's informer rebuilds
+from the API-server view and every pod is re-observed. No state was
+persisted and none was lost. The pre-restart 0.69 is reconcile cadence
+against a fresh workload (first snapshot lands one reconcile after
+workload launch). Once the operator has had a few ticks to re-sum
+everyone's elapsed runtime, the post-restart reading converges to
+0.996 — essentially the same accuracy as `make bench`, which says the
+restart cost nothing.
 
 ## Development
 
@@ -163,11 +190,27 @@ make test-e2e            # Ginkgo against a fresh kind cluster
 make lint                # golangci-lint v2
 make manifests generate  # regen CRD + deepcopy after API changes
 make helm-lint           # lint the Helm chart (requires helm)
+make demo                # regenerate docs/media/demo.gif (requires vhs)
 ```
 
 The `config/` directory holds the kustomize sources; `make
 build-installer` emits a single-file `dist/install.yaml` that's
 functionally equivalent to the Helm chart for air-gapped clusters.
+
+## Run on Azure (AKS)
+
+The `deploy/aks/` directory ships a Bicep template + `parameters.example.json`
+that provision an AKS cluster (1.31, 2× B2s, Azure CNI overlay) and a
+Basic ACR with `adminUserEnabled: false` and an AcrPull role assignment
+to the cluster's kubelet identity. `.github/workflows/aks-deploy.yml`
+then builds the operator image on every push, pushes it to ACR, and
+runs `helm upgrade --install` against the cluster via
+`azure/setup-helm`. Intended for a student subscription — the
+trade-offs (no GPU node pool, no monitoring addon, public API server)
+are documented in [`deploy/aks/README.md`](deploy/aks/README.md).
+
+Required repo secrets: `AZURE_CREDENTIALS`, `AZURE_RESOURCE_GROUP`,
+`AKS_CLUSTER_NAME`, `ACR_NAME`.
 
 ## Repository layout
 
@@ -182,9 +225,11 @@ internal/webhook/         Validating webhook
 test/e2e/                 Ginkgo e2e suite
 test/bench/               Accuracy harness + gwb-bench CLI
 test/workload-generator/  gwb-workload CLI
-hack/                     bench.sh, chaos.sh, helm-lint.sh, bench-stack/
+hack/                     bench.sh, chaos.sh, demo/, helm-lint.sh, bench-stack/
 deploy/helm/gwb-operator/ Helm chart
+deploy/aks/               Bicep + parameters for AKS
 docs/                     accounting-model, benchmark-methodology, limitations
+docs/media/               demo.gif (regenerable via `make demo`)
 ```
 
 ## Status and limitations

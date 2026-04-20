@@ -126,6 +126,18 @@ chaos: build workload-generator gwb-bench ## Run the restart-correctness chaos s
 helm-lint: ## Lint + dry-render the deploy/helm/gwb-operator chart. Requires helm.
 	bash hack/helm-lint.sh
 
+##@ Demo
+
+.PHONY: demo
+demo: build workload-generator ## Regenerate the README hero GIF (requires vhs + docker + kind).
+	bash hack/demo/setup.sh
+	vhs hack/demo/demo.tape
+	bash hack/demo/teardown.sh
+
+.PHONY: demo-record
+demo-record: ## Re-record demo.gif only — assumes 'make demo' already brought a cluster up and left it (KEEP_CLUSTER=1).
+	vhs hack/demo/demo.tape
+
 ##@ Build
 
 .PHONY: build
