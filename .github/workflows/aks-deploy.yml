@@ -1,0 +1,85 @@
+name: AKS Deploy
+
+# Gated on workflow_dispatch so a fresh fork doesn't auto-deploy to
+# whatever AZURE_CREDENTIALS the previous owner left behind. Flip in
+# the push: trigger below once you're confident.
+on:
+  workflow_dispatch:
+    inputs:
+      imageTag:
+        description: 'Image tag to build and deploy'
+        required: true
+        default: 'main'
+
+  # Uncomment to deploy on every main push once you trust the pipeline.
+  # push:
+  #   branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # ACR login populates docker's creds so the subsequent build+push
+      # doesn't need a separate --password. The AcrPull role on the AKS
+      # kubelet identity is what the *cluster* uses to pull; the
+      # workflow's push uses the login identity from AZURE_CREDENTIALS.
+      - name: ACR login
+        run: az acr login --name "${{ secrets.ACR_NAME }}"
+
+      - name: Build and push image
+        env:
+          IMG: ${{ secrets.ACR_NAME }}.azurecr.io/gpu-k8s-operator:${{ inputs.imageTag }}
+        run: |
+          make docker-build IMG="$IMG"
+          docker push "$IMG"
+
+      - name: Get AKS credentials
+        uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ secrets.AZURE_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+
+      - name: Install cert-manager (idempotent)
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.0
+
+      - name: cert-manager upgrade
+        run: |
+          helm repo add jetstack https://charts.jetstack.io
+          helm repo update
+          helm upgrade --install cert-manager jetstack/cert-manager \
+            --namespace cert-manager --create-namespace \
+            --set crds.enabled=true \
+            --wait
+
+      - name: Deploy gwb-operator
+        env:
+          IMG_REPO: ${{ secrets.ACR_NAME }}.azurecr.io/gpu-k8s-operator
+        run: |
+          helm upgrade --install gwb-operator ./deploy/helm/gwb-operator \
+            --namespace gpu-k8s-operator-system --create-namespace \
+            --set image.repository="$IMG_REPO" \
+            --set image.tag="${{ inputs.imageTag }}" \
+            --set metrics.serviceMonitor.enabled=false \
+            --wait --timeout 5m
+
+      - name: Smoke test
+        run: |
+          kubectl -n gpu-k8s-operator-system get deploy
+          kubectl -n gpu-k8s-operator-system rollout status \
+            deploy/gwb-operator --timeout=120s
+          # Apply the sample CR and verify it's admitted by the webhook.
+          kubectl apply -f config/samples/budget_v1alpha1_gpuworkloadbudget.yaml
+          kubectl get gwb -A

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentPrefix": { "value": "gwb" },
+    "location": { "value": "eastus" },
+    "kubernetesVersion": { "value": "1.31.2" },
+    "nodeCount": { "value": 2 },
+    "nodeVmSize": { "value": "Standard_B2s" },
+    "tags": {
+      "value": {
+        "project": "gpu-k8s-operator",
+        "environment": "dev"
+      }
+    }
+  }
+}
