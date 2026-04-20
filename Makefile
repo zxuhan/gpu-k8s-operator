@@ -116,6 +116,12 @@ bench: build workload-generator gwb-bench ## Run the full benchmark suite on a f
 gwb-bench: ## Build gwb-bench, the bench report CLI.
 	go build -o bin/gwb-bench ./test/bench/cmd/gwb-bench
 
+CHAOS_OUT ?= chaos-results/$(shell date +%Y-%m-%d)
+
+.PHONY: chaos
+chaos: build workload-generator gwb-bench ## Run the restart-correctness chaos scenario and write results under chaos-results/YYYY-MM-DD/.
+	CHAOS_OUT="$(CHAOS_OUT)" bash hack/chaos.sh
+
 ##@ Build
 
 .PHONY: build
