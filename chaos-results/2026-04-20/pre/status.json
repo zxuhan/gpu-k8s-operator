@@ -5,15 +5,15 @@
         "annotations": {
             "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"budget.zxuhan.dev/v1alpha1\",\"kind\":\"GPUWorkloadBudget\",\"metadata\":{\"annotations\":{},\"name\":\"chaos\",\"namespace\":\"gwb-chaos\"},\"spec\":{\"enforcement\":{\"action\":\"AlertOnly\",\"gracePeriodSeconds\":30},\"gpuResourceName\":\"cpu\",\"quota\":{\"gpuHours\":\"1\",\"windowHours\":24},\"selector\":{\"matchLabels\":{\"app\":\"gwb-chaos-worker\"}}}}\n"
         },
-        "creationTimestamp": "2026-04-20T06:58:38Z",
+        "creationTimestamp": "2026-04-20T18:04:33Z",
         "finalizers": [
             "budget.zxuhan.dev/finalizer"
         ],
         "generation": 1,
         "name": "chaos",
         "namespace": "gwb-chaos",
-        "resourceVersion": "1249",
-        "uid": "5db91c21-71b0-4f4d-9825-5d7dbfe5085d"
+        "resourceVersion": "1254",
+        "uid": "03242f7c-daf3-4388-adb5-39dec6e0af7d"
     },
     "spec": {
         "enforcement": {
@@ -34,21 +34,21 @@
     "status": {
         "conditions": [
             {
-                "lastTransitionTime": "2026-04-20T06:58:38Z",
+                "lastTransitionTime": "2026-04-20T18:04:33Z",
                 "message": "Accounting computed successfully.",
                 "reason": "Reconciled",
                 "status": "True",
                 "type": "Ready"
             },
             {
-                "lastTransitionTime": "2026-04-20T06:58:38Z",
+                "lastTransitionTime": "2026-04-20T18:04:33Z",
                 "message": "Consumed 0.012 of 1.000 GPU-hours.",
                 "reason": "WithinBudget",
                 "status": "False",
                 "type": "QuotaExceeded"
             },
             {
-                "lastTransitionTime": "2026-04-20T06:58:38Z",
+                "lastTransitionTime": "2026-04-20T18:04:33Z",
                 "message": "Controller reconciled the budget without error.",
                 "reason": "ReconcileSucceeded",
                 "status": "False",

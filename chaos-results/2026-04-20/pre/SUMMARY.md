@@ -1,6 +1,6 @@
 # Benchmark Summary
 
-Generated: 2026-04-20T06:58:53Z
+Generated: 2026-04-20T18:04:49Z
 
 Label: `pre-restart`
 
