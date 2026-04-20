@@ -1,0 +1,31 @@
+gwb-operator {{ .Chart.AppVersion }} installed as release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+Verify the controller came up:
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "gwb-operator.fullname" . }}
+
+Create a budget:
+  cat <<EOF | kubectl apply -f -
+  apiVersion: budget.zxuhan.dev/v1alpha1
+  kind: GPUWorkloadBudget
+  metadata:
+    name: team-a
+    namespace: default
+  spec:
+    selector:
+      matchLabels: { team: a }
+    quota:
+      gpuHours: "100"
+      windowHours: 24
+    enforcement:
+      action: AlertOnly
+  EOF
+
+Watch accounting:
+  kubectl get gwb team-a -w
+
+{{- if not .Values.webhook.enabled }}
+
+WARNING: webhook.enabled=false. The validating webhook is off, so an
+invalid GPUWorkloadBudget (empty selector, zero quota) will be
+admitted and the controller will surface the failure in .status only.
+{{- end }}

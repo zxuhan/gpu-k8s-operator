@@ -1,0 +1,118 @@
+{{/*
+Three layers of RBAC, mirrored from config/rbac/:
+
+  1. Manager ClusterRole — the pod/event/eviction verbs the controller
+     needs to reconcile budgets across the cluster.
+  2. Metrics auth ClusterRole — grants the controller the ability to
+     delegate TokenReview / SubjectAccessReview so the metrics HTTPS
+     endpoint can authn/authz scrapers.
+  3. Leader-election Role — namespace-scoped, for coordinated leader
+     election among controller replicas.
+*/}}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "gwb-operator.fullname" . }}-manager
+  labels:
+    {{- include "gwb-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, patch, watch]
+  - apiGroups: [""]
+    resources: [pods/eviction]
+    verbs: [create]
+  - apiGroups: [budget.zxuhan.dev]
+    resources: [gpuworkloadbudgets]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: [budget.zxuhan.dev]
+    resources: [gpuworkloadbudgets/finalizers]
+    verbs: [update]
+  - apiGroups: [budget.zxuhan.dev]
+    resources: [gpuworkloadbudgets/status]
+    verbs: [get, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "gwb-operator.fullname" . }}-manager
+  labels:
+    {{- include "gwb-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "gwb-operator.fullname" . }}-manager
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "gwb-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "gwb-operator.fullname" . }}-metrics-auth
+  labels:
+    {{- include "gwb-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+  - apiGroups: [authorization.k8s.io]
+    resources: [subjectaccessreviews]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "gwb-operator.fullname" . }}-metrics-auth
+  labels:
+    {{- include "gwb-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "gwb-operator.fullname" . }}-metrics-auth
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "gwb-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- if .Values.leaderElection.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "gwb-operator.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gwb-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "gwb-operator.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gwb-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "gwb-operator.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "gwb-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

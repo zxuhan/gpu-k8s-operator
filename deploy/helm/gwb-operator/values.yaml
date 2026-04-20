@@ -1,0 +1,94 @@
+# Default values for gwb-operator.
+# Every knob is documented in-line; keep this file tight so `helm show
+# values gwb-operator` stays readable.
+
+image:
+  repository: controller
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Only one replica is recommended. Accounting is eventual-consistent and
+# a second replica without leader-election would race on .status writes.
+# Leader-election is on by default so two replicas *is* safe; it is
+# still rarely worth the resource cost.
+replicaCount: 1
+
+# Graceful shutdown window for the controller. Ten seconds is enough
+# for in-flight reconciles to finish without holding up a rolling
+# restart.
+terminationGracePeriodSeconds: 10
+
+# Container resources. Defaults picked for a medium-sized cluster
+# (~1k pods to reconcile). The benchmark under hack/bench.sh runs
+# comfortably within the request tier.
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 128Mi
+
+# Standard pass-through knobs for placement.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+podLabels: {}
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Leader election is required whenever replicaCount > 1. Leaving it on
+# for replicaCount=1 is harmless and makes HA upgrades a one-flag
+# change.
+leaderElection:
+  enabled: true
+
+# Metrics are exposed on an HTTPS endpoint authenticated via
+# Kubernetes-issued tokens. metrics.service controls the Service, while
+# metrics.serviceMonitor controls whether a prometheus-operator
+# ServiceMonitor is created (opt-in — many clusters don't run it).
+metrics:
+  service:
+    enabled: true
+    port: 8443
+  serviceMonitor:
+    enabled: false
+    # Labels prometheus-operator uses to pick the ServiceMonitor up.
+    # Set to the values your Prometheus CR's serviceMonitorSelector
+    # matches on — default is {} so the SM lands under whichever
+    # Prometheus has `serviceMonitorSelector: {}`.
+    labels: {}
+    interval: 30s
+    scrapeTimeout: 10s
+    scheme: https
+    # insecureSkipVerify is turned OFF when certManager is enabled
+    # (cert-manager issues the serving cert; Prometheus trusts it via
+    # the cluster CA). With certManager disabled we can't guarantee a
+    # verifiable cert is in place, so we skip verification — flagged
+    # clearly here so nobody enables SM without noticing the risk.
+    insecureSkipVerify: true
+
+# Webhook: validating only. certManager is the default issuer; if you
+# run your own CA or disable admission entirely, set webhook.enabled
+# to false and point your own CA/serving-cert at the webhook-service.
+webhook:
+  enabled: true
+  service:
+    port: 443
+    targetPort: 9443
+  certManager:
+    enabled: true
+    # When you already have a ClusterIssuer, override both fields. The
+    # default creates a self-signed Issuer scoped to the release ns,
+    # which is the lowest-friction path for dev clusters.
+    issuerRef:
+      name: ""
+      kind: ""
+
+# Health and liveness probe port (controller-runtime default).
+healthProbe:
+  port: 8081

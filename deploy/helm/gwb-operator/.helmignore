@@ -1,0 +1,14 @@
+# Patterns that should not go into the chart tarball.
+.DS_Store
+.git/
+.gitignore
+.vscode/
+.idea/
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+# Editors / CI artefacts
+.tox/
+.cache/

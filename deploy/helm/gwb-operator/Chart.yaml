@@ -1,0 +1,26 @@
+apiVersion: v2
+name: gwb-operator
+description: |
+  GPUWorkloadBudget operator — a namespaced CRD that tracks cumulative
+  GPU-hours over a rolling window and enforces a quota via evict/pause/
+  alert. Chart installs the controller, ValidatingWebhookConfiguration,
+  cert-manager bits for webhook TLS, and an optional ServiceMonitor.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.28.0-0"
+keywords:
+  - gpu
+  - accounting
+  - budget
+  - quota
+  - operator
+home: https://github.com/zxuhan/gpu-k8s-operator
+sources:
+  - https://github.com/zxuhan/gpu-k8s-operator
+maintainers:
+  - name: zxuhan
+annotations:
+  # cert-manager is assumed present; webhook.certManager.enabled=false
+  # is for clusters that already wire webhook certs some other way.
+  artifacthub.io/prerelease: "true"

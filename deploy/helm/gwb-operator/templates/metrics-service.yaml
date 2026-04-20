@@ -1,0 +1,19 @@
+{{- if .Values.metrics.service.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gwb-operator.metricsServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gwb-operator.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "gwb-operator.selectorLabels" . | nindent 4 }}
+    control-plane: controller-manager
+  ports:
+    - name: https
+      port: {{ .Values.metrics.service.port }}
+      targetPort: https
+      protocol: TCP
+{{- end }}

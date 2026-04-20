@@ -1,0 +1,49 @@
+{{- if .Values.webhook.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gwb-operator.webhookServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gwb-operator.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "gwb-operator.selectorLabels" . | nindent 4 }}
+    control-plane: controller-manager
+  ports:
+    - name: webhook
+      port: {{ .Values.webhook.service.port }}
+      targetPort: webhook-server
+      protocol: TCP
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "gwb-operator.fullname" . }}-validating
+  labels:
+    {{- include "gwb-operator.labels" . | nindent 4 }}
+  {{- if .Values.webhook.certManager.enabled }}
+  annotations:
+    # cert-manager injects the CA bundle into every ValidatingWebhook
+    # in this object when it issues the serving cert, so the chart
+    # doesn't have to template a CA.
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "gwb-operator.webhookCertName" . }}
+  {{- end }}
+webhooks:
+  - name: vgpuworkloadbudget-v1alpha1.kb.io
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    clientConfig:
+      service:
+        name: {{ include "gwb-operator.webhookServiceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-budget-zxuhan-dev-v1alpha1-gpuworkloadbudget
+        port: {{ .Values.webhook.service.port }}
+    rules:
+      - apiGroups: [budget.zxuhan.dev]
+        apiVersions: [v1alpha1]
+        operations: [CREATE, UPDATE]
+        resources: [gpuworkloadbudgets]
+{{- end }}

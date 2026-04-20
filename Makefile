@@ -122,6 +122,10 @@ CHAOS_OUT ?= chaos-results/$(shell date +%Y-%m-%d)
 chaos: build workload-generator gwb-bench ## Run the restart-correctness chaos scenario and write results under chaos-results/YYYY-MM-DD/.
 	CHAOS_OUT="$(CHAOS_OUT)" bash hack/chaos.sh
 
+.PHONY: helm-lint
+helm-lint: ## Lint + dry-render the deploy/helm/gwb-operator chart. Requires helm.
+	bash hack/helm-lint.sh
+
 ##@ Build
 
 .PHONY: build
