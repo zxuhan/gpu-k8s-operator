@@ -1,0 +1,16 @@
+{
+  "scenario": {
+    "Count": 50,
+    "Rate": 10,
+    "Runtime": 30000000000,
+    "GPUs": 0.1
+  },
+  "elapsedSeconds": 45,
+  "reportedGpuHours": 0.04,
+  "expectedGpuHours": 0.041666666666666664,
+  "deltaGpuHours": -0.0016666666666666635,
+  "accuracyRatio": 0.9600000000000001,
+  "trackedPods": 50,
+  "label": "count=50 rate=10 runtime=30s gpus=100m resource=cpu",
+  "generatedAt": "2026-04-20T06:57:13Z"
+}

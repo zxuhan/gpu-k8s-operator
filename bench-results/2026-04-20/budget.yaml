@@ -1,0 +1,16 @@
+apiVersion: budget.zxuhan.dev/v1alpha1
+kind: GPUWorkloadBudget
+metadata:
+  name: bench
+  namespace: gwb-bench
+spec:
+  selector:
+    matchLabels:
+      app: gwb-bench-worker
+  quota:
+    gpuHours: "1"
+    windowHours: 24
+  enforcement:
+    action: AlertOnly
+    gracePeriodSeconds: 30
+  gpuResourceName: cpu

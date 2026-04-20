@@ -28,3 +28,9 @@ go.work
 
 # Kubeconfig might contain secrets
 *.kubeconfig
+
+# Bench + chaos harness logs — noisy docker/kubectl output.
+# The curated artefacts (SUMMARY.md, results.json, status.json,
+# budget.yaml) are committed; the raw logs are not.
+bench-results/**/*.log
+chaos-results/**/*.log

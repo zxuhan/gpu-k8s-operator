@@ -1,0 +1,63 @@
+{
+    "apiVersion": "budget.zxuhan.dev/v1alpha1",
+    "kind": "GPUWorkloadBudget",
+    "metadata": {
+        "annotations": {
+            "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"budget.zxuhan.dev/v1alpha1\",\"kind\":\"GPUWorkloadBudget\",\"metadata\":{\"annotations\":{},\"name\":\"bench\",\"namespace\":\"gwb-bench\"},\"spec\":{\"enforcement\":{\"action\":\"AlertOnly\",\"gracePeriodSeconds\":30},\"gpuResourceName\":\"cpu\",\"quota\":{\"gpuHours\":\"1\",\"windowHours\":24},\"selector\":{\"matchLabels\":{\"app\":\"gwb-bench-worker\"}}}}\n"
+        },
+        "creationTimestamp": "2026-04-20T06:56:28Z",
+        "finalizers": [
+            "budget.zxuhan.dev/finalizer"
+        ],
+        "generation": 1,
+        "name": "bench",
+        "namespace": "gwb-bench",
+        "resourceVersion": "1461",
+        "uid": "8a459dfd-e09b-4f53-84ec-9d2368459a4c"
+    },
+    "spec": {
+        "enforcement": {
+            "action": "AlertOnly",
+            "gracePeriodSeconds": 30
+        },
+        "gpuResourceName": "cpu",
+        "quota": {
+            "gpuHours": "1",
+            "windowHours": 24
+        },
+        "selector": {
+            "matchLabels": {
+                "app": "gwb-bench-worker"
+            }
+        }
+    },
+    "status": {
+        "conditions": [
+            {
+                "lastTransitionTime": "2026-04-20T06:56:28Z",
+                "message": "Accounting computed successfully.",
+                "reason": "Reconciled",
+                "status": "True",
+                "type": "Ready"
+            },
+            {
+                "lastTransitionTime": "2026-04-20T06:56:28Z",
+                "message": "Consumed 0.040 of 1.000 GPU-hours.",
+                "reason": "WithinBudget",
+                "status": "False",
+                "type": "QuotaExceeded"
+            },
+            {
+                "lastTransitionTime": "2026-04-20T06:56:28Z",
+                "message": "Controller reconciled the budget without error.",
+                "reason": "ReconcileSucceeded",
+                "status": "False",
+                "type": "Degraded"
+            }
+        ],
+        "consumedGpuHours": "40m",
+        "observedGeneration": 1,
+        "remainingGpuHours": "960m",
+        "trackedPods": 50
+    }
+}
