@@ -94,6 +94,25 @@ Both write `SUMMARY.md` tables plus a `results.json` with the raw
 numbers. `bench.sh` and `chaos.sh` honour env-vars for scenario knobs
 (`BENCH_COUNT`, `BENCH_RATE`, …) — see the scripts for the full list.
 
+### Interpreting the chaos numbers
+
+The chaos harness snapshots at two points: `CHAOS_PRE_SECONDS` (before
+the operator restart) and `CHAOS_POST_SECONDS` (after). Defaults (15s
+/ 45s) are tuned to fit inside a 60s pod runtime so every pod is still
+Running at the second snapshot — that's what makes `tracked_pods` a
+meaningful "did the informer rebuild?" signal across the restart.
+
+The accuracy ratio at either snapshot is *not* directly comparable to
+the `make bench` scenario's number. Bench lets pods run to completion
+so the reconcile loop has time to converge; chaos deliberately
+snapshots mid-window. A low post-restart accuracy with
+`tracked_pods == count` means "operator saw every pod but hasn't
+finished a full reconcile sweep yet" — bump `CHAOS_POST_SECONDS` past
+one or two reconcile cadences (~30s) to watch it converge back toward
+the steady-state number. A low post-restart `tracked_pods` would be a
+real regression: it means pods disappeared from the informer cache
+before the operator re-observed them.
+
 ## What the numbers *don't* claim
 
 - Production performance. A laptop kind cluster is bounded by a

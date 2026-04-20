@@ -101,3 +101,13 @@ it bites and the phase during which it was confirmed.
   behaviour of the accounting engine is bounded by its statelessness
   (no in-memory growth possible per-reconcile), but this is a
   theoretical argument, not an observed one.
+
+- **`gwb_accounting_accuracy_ratio` is always zero.** The metric is
+  registered by the operator so dashboards can pin a panel at it, but
+  the operator itself does not know ground truth — it can't compute
+  `reported / expected` without the scenario description that lives in
+  the bench harness. The bench writes that ratio to
+  `bench-results/.../results.json`; pushing it back into the operator
+  as a runtime metric would require either a side-channel from the
+  bench or a synthetic-ground-truth controller, neither of which
+  exists. Treat the metric as a reserved slot. *Phase 6.*

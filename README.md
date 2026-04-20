@@ -93,8 +93,8 @@ Exposed on an HTTPS endpoint guarded by Kubernetes TokenReview
 | `gwb_consumed_gpu_hours{namespace, name}` | current `.status.consumedGpuHours` |
 | `gwb_remaining_gpu_hours{namespace, name}` | `quota − consumed`, clamped |
 | `gwb_enforcement_actions_total{action, namespace, name}` | counter incremented per action fired |
-| `gwb_accounting_accuracy_ratio{namespace, name}` | reported/expected, set from bench |
 | `gwb_tracked_pods{namespace, name}` | pods matched by selector at last reconcile |
+| `gwb_accounting_accuracy_ratio{namespace, name}` | registered, currently always 0 — the operator doesn't know ground truth; the bench harness computes this externally and writes it to `bench-results/…/results.json` |
 
 Controller-runtime's default metrics (reconcile latency, workqueue
 depth, etc.) are served alongside.
@@ -107,9 +107,51 @@ make chaos    # restart-correctness scenario → chaos-results/YYYY-MM-DD/SUMMAR
 ```
 
 The accuracy formula and the reason benches run on kind are in
-[docs/benchmark-methodology.md](docs/benchmark-methodology.md). The
-README intentionally does not quote a headline accuracy number here
-until a full bench run is checked into `bench-results/`.
+[docs/benchmark-methodology.md](docs/benchmark-methodology.md).
+
+### Measured numbers (kind, M-series laptop, 2026-04-20)
+
+Recorded in-repo under [`bench-results/2026-04-20/`](bench-results/2026-04-20/)
+and [`chaos-results/2026-04-20/`](chaos-results/2026-04-20/). Regenerate
+any time with `make bench` / `make chaos` — the harness owns the
+numbers, the README just quotes them.
+
+**Steady-state accuracy** — 50 busybox pods at 10/s, 30s runtime each,
+0.1 CPU "GPU" per pod, snapshot at t=45s (all pods terminated):
+
+| Metric | Value |
+|---|---|
+| reported GPU-hours | 0.04000 |
+| expected GPU-hours | 0.04167 |
+| **accuracy ratio** | **0.96** |
+| delta | −6 pod-seconds |
+| tracked pods | 50 |
+
+The −6-pod-second delta is the kubelet start-up lag: the accounting
+engine counts from `state.running.startedAt`, which kubelet stamps a
+fraction of a second after pod-create. See
+[docs/accounting-model.md](docs/accounting-model.md) for the formula.
+
+**Restart correctness** — same workload, runtime bumped to 60s so pods
+are still Running when we snapshot. Operator pod deleted at t=15s and
+allowed to reconcile for 15s before the post snapshot:
+
+| Phase | Elapsed | Reported | Expected | Accuracy | Tracked pods |
+|---|---|---|---|---|---|
+| pre-restart  | 15s | 0.0120 | 0.0174 | 0.69 | 50 |
+| post-restart | 45s | 0.0310 | 0.0591 | 0.52 | 50 |
+
+`tracked_pods=50` before and after confirms the stateless-recovery
+claim: controller-runtime's informer cache rebuilds from the
+API-server view on startup, so every pod is re-observed. The headline
+accuracy gap here is not lost accounting — it's reconcile cadence.
+The post-restart snapshot lands one reconcile after the operator comes
+back up, before the engine has re-summed all 50 pods' full elapsed
+runtime. By contrast the `make bench` scenario above runs to pod
+completion, which gives the engine multiple reconciles to converge.
+Raising `CHAOS_POST_SECONDS` closes the gap at the cost of a longer
+run; tuning it is documented in
+[docs/benchmark-methodology.md](docs/benchmark-methodology.md).
 
 ## Development
 
