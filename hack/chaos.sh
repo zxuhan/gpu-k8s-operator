@@ -42,7 +42,9 @@ set -euo pipefail
 : "${CHAOS_POST_SECONDS:=45}"
 : "${CHAOS_LABEL:=app=gwb-chaos-worker}"
 : "${KEEP_CLUSTER:=0}"
-: "${IMG:=controller:latest}"
+# Non-"latest" tag so kubelet uses the kind-loaded image (IfNotPresent)
+# rather than trying to pull from docker.io (the :latest default).
+: "${IMG:=controller:chaos}"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -57,7 +59,7 @@ mkdir -p "$CHAOS_OUT/pre" "$CHAOS_OUT/post"
 : > "$CHAOS_OUT/chaos.log"
 exec > >(tee -a "$CHAOS_OUT/chaos.log") 2>&1
 
-log() { printf '[chaos %(%H:%M:%S)T] %s\n' -1 "$*"; }
+log() { printf '[chaos %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
 cleanup() {
   local rc=$?
@@ -97,6 +99,13 @@ fi
 log "building + loading operator image $IMG"
 (cd "$root" && make docker-build IMG="$IMG" >/dev/null)
 "$KIND" load docker-image "$IMG" --name "$KIND_CLUSTER" >/dev/null
+
+: "${CERT_MANAGER_VERSION:=v1.15.3}"
+log "installing cert-manager $CERT_MANAGER_VERSION"
+"$KUBECTL" apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml" >/dev/null
+"$KUBECTL" -n cert-manager rollout status deploy/cert-manager --timeout=180s
+"$KUBECTL" -n cert-manager rollout status deploy/cert-manager-webhook --timeout=180s
+"$KUBECTL" -n cert-manager rollout status deploy/cert-manager-cainjector --timeout=180s
 
 log "installing CRDs + operator"
 (cd "$root" && make install deploy IMG="$IMG" >/dev/null)

@@ -40,7 +40,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
 // options mirrors the CLI flags 1:1. Exposed as a struct so tests can
@@ -165,16 +164,22 @@ func intervalFromRate(rps float64) time.Duration {
 	return time.Duration(float64(time.Second) / rps)
 }
 
-// loadKubeconfig honours --kubeconfig first, then falls back to the
-// controller-runtime chain (KUBECONFIG → ~/.kube/config → in-cluster).
-// Reusing the controller-runtime loader keeps the generator's config
-// discovery identical to the operator's, which matters when both are
-// run from the same CI shell.
+// loadKubeconfig honours --kubeconfig first, then clientcmd's default
+// loader (KUBECONFIG env / ~/.kube/config), and finally falls back to
+// the in-cluster config. We avoid sigs.k8s.io/controller-runtime/pkg/client/config
+// here because its import chain re-registers the --kubeconfig flag on
+// flag.CommandLine, which collides with our own flag definition.
 func loadKubeconfig(override string) (*rest.Config, error) {
 	if override != "" {
 		return clientcmd.BuildConfigFromFlags("", override)
 	}
-	return ctrlconfig.GetConfig()
+	loader := clientcmd.NewDefaultClientConfigLoadingRules()
+	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		loader, &clientcmd.ConfigOverrides{}).ClientConfig()
+	if err == nil {
+		return cfg, nil
+	}
+	return rest.InClusterConfig()
 }
 
 func buildPod(o options, labelKey, labelVal string, gpuQty resource.Quantity, idx int) *corev1.Pod {

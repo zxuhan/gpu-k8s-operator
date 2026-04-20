@@ -46,7 +46,10 @@ set -euo pipefail
 : "${BENCH_OBSERVE_SECONDS:=45}"
 : "${BENCH_LABEL:=app=gwb-bench-worker}"
 : "${KEEP_CLUSTER:=0}"
-: "${IMG:=controller:latest}"
+# Deliberately avoid ":latest" — kubelet defaults imagePullPolicy to Always
+# for :latest, which makes kind's image-load pointless (kubelet would try to
+# pull from docker.io instead). Any non-"latest" tag defaults to IfNotPresent.
+: "${IMG:=controller:bench}"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -67,7 +70,7 @@ mkdir -p "$BENCH_OUT"
 : > "$BENCH_OUT/bench.log"
 exec > >(tee -a "$BENCH_OUT/bench.log") 2>&1
 
-log() { printf '[bench %(%H:%M:%S)T] %s\n' -1 "$*"; }
+log() { printf '[bench %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
 cleanup() {
   local rc=$?
@@ -106,8 +109,20 @@ log "loading $IMG into kind"
 "$KIND" load docker-image "$IMG" --name "$KIND_CLUSTER" >/dev/null
 
 ###############################################################################
-# 3. Install CRDs, deploy operator
+# 3. Install cert-manager, CRDs, deploy operator
+#
+# The kustomize deploy in config/ uses cert-manager Issuer + Certificate
+# resources for the webhook/metrics TLS. Install cert-manager first so
+# those resources have a home; use the upstream static manifest rather
+# than helm to keep the bench dependency set small.
 ###############################################################################
+: "${CERT_MANAGER_VERSION:=v1.15.3}"
+log "installing cert-manager $CERT_MANAGER_VERSION"
+"$KUBECTL" apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml" >/dev/null
+"$KUBECTL" -n cert-manager rollout status deploy/cert-manager --timeout=180s
+"$KUBECTL" -n cert-manager rollout status deploy/cert-manager-webhook --timeout=180s
+"$KUBECTL" -n cert-manager rollout status deploy/cert-manager-cainjector --timeout=180s
+
 log "installing CRDs + operator"
 (cd "$root" && make install deploy IMG="$IMG" >/dev/null)
 
