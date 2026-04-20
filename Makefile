@@ -109,14 +109,22 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 BENCH_OUT ?= bench-results/$(shell date +%Y-%m-%d)
 
 .PHONY: bench
-bench: ## Run the full benchmark suite on a fresh kind cluster and write results under bench-results/YYYY-MM-DD/.
+bench: build workload-generator gwb-bench ## Run the full benchmark suite on a fresh kind cluster and write results under bench-results/YYYY-MM-DD/.
 	BENCH_OUT="$(BENCH_OUT)" bash hack/bench.sh
+
+.PHONY: gwb-bench
+gwb-bench: ## Build gwb-bench, the bench report CLI.
+	go build -o bin/gwb-bench ./test/bench/cmd/gwb-bench
 
 ##@ Build
 
 .PHONY: build
 build: manifests generate fmt vet ## Build gwb-operator binary.
 	go build -o bin/gwb-operator cmd/main.go
+
+.PHONY: workload-generator
+workload-generator: ## Build gwb-workload, the bench-harness pod generator.
+	go build -o bin/gwb-workload ./test/workload-generator
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
