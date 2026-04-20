@@ -318,17 +318,12 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
-
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput, err := getMetricsOutput()
-		// Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
 	})
+
+	// Project-specific scenarios — CR lifecycle, webhook rejections,
+	// accounting, enforcement. Declared in gwb_lifecycle_test.go so the
+	// scaffold above stays close to upstream kubebuilder.
+	declareGWBLifecycleContext()
 })
 
 // serviceAccountToken returns a token for the specified service account in the given namespace.
