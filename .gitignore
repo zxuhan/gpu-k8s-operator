@@ -41,3 +41,4 @@ hack/demo/node_modules/
 hack/demo/demo.webm
 hack/demo/.palette.png
 hack/demo/.record/
+hack/demo/.auth.json

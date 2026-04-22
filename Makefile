@@ -131,22 +131,18 @@ helm-lint: ## Lint + dry-render the deploy/helm/gwb-operator chart. Requires hel
 .PHONY: demo
 demo: build workload-generator ## Regenerate the README hero GIF (requires docker, kind, helm, node, ffmpeg).
 	bash hack/demo/setup.sh
-	bash hack/demo/orchestrate.sh & orch_pid=$$!; \
-	  (cd hack/demo && RECORD_SECONDS=90 node record.mjs); \
-	  wait $$orch_pid
-	ffmpeg -y -ss 3 -t 75 -i hack/demo/demo.webm -vf "fps=8,scale=720:-1:flags=lanczos,palettegen=max_colors=96" hack/demo/.palette.png
-	ffmpeg -y -ss 3 -t 75 -i hack/demo/demo.webm -i hack/demo/.palette.png -lavfi "fps=8,scale=720:-1:flags=lanczos [v]; [v][1:v] paletteuse=dither=bayer:bayer_scale=5" -loop 0 docs/media/demo.gif
+	cd hack/demo && RECORD_SECONDS=60 node record.mjs
+	ffmpeg -y -ss 1.5 -t 58 -i hack/demo/demo.webm -vf "fps=8,scale=720:-1:flags=lanczos,palettegen=max_colors=96" hack/demo/.palette.png
+	ffmpeg -y -ss 1.5 -t 58 -i hack/demo/demo.webm -i hack/demo/.palette.png -lavfi "fps=8,scale=720:-1:flags=lanczos [v]; [v][1:v] paletteuse=dither=bayer:bayer_scale=5" -loop 0 docs/media/demo.gif
 	rm -f hack/demo/demo.webm hack/demo/.palette.png
 	rm -rf hack/demo/.record
 	bash hack/demo/teardown.sh
 
 .PHONY: demo-record
 demo-record: ## Re-record demo.gif only. Assumes 'make demo' already brought a cluster up and left it.
-	bash hack/demo/orchestrate.sh & orch_pid=$$!; \
-	  (cd hack/demo && RECORD_SECONDS=90 node record.mjs); \
-	  wait $$orch_pid
-	ffmpeg -y -ss 3 -t 75 -i hack/demo/demo.webm -vf "fps=8,scale=720:-1:flags=lanczos,palettegen=max_colors=96" hack/demo/.palette.png
-	ffmpeg -y -ss 3 -t 75 -i hack/demo/demo.webm -i hack/demo/.palette.png -lavfi "fps=8,scale=720:-1:flags=lanczos [v]; [v][1:v] paletteuse=dither=bayer:bayer_scale=5" -loop 0 docs/media/demo.gif
+	cd hack/demo && RECORD_SECONDS=60 node record.mjs
+	ffmpeg -y -ss 1.5 -t 58 -i hack/demo/demo.webm -vf "fps=8,scale=720:-1:flags=lanczos,palettegen=max_colors=96" hack/demo/.palette.png
+	ffmpeg -y -ss 1.5 -t 58 -i hack/demo/demo.webm -i hack/demo/.palette.png -lavfi "fps=8,scale=720:-1:flags=lanczos [v]; [v][1:v] paletteuse=dither=bayer:bayer_scale=5" -loop 0 docs/media/demo.gif
 	rm -f hack/demo/demo.webm hack/demo/.palette.png
 	rm -rf hack/demo/.record
 

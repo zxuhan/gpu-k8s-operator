@@ -92,6 +92,34 @@ log "installing operator Helm chart with ServiceMonitor"
 "$KUBECTL" -n "$OPERATOR_NS" rollout status \
   "deploy/$OPERATOR_RELEASE" --timeout=180s
 
+# 6b. The operator's /metrics endpoint requires callers to have the
+# 'get /metrics' non-resource URL right. The chart binds that to the
+# operator's own SA (for TokenReview). Prometheus scrapes with its own
+# SA, so we add a cluster-scoped binding from that SA to a fresh
+# metrics-reader ClusterRole.
+cat <<EOF | "$KUBECTL" apply -f - >/dev/null
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gwb-operator-metrics-reader
+rules:
+- nonResourceURLs: ["/metrics"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gwb-operator-metrics-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gwb-operator-metrics-reader
+subjects:
+- kind: ServiceAccount
+  name: ${KPS_RELEASE}-kube-prometheus-stack-prometheus
+  namespace: ${MONITORING_NS}
+EOF
+
 # 7. Dashboard ConfigMap (sidecar auto-loads when label grafana_dashboard=1)
 log "installing Grafana dashboard ConfigMap"
 dash_body=$(sed 's/^/    /' "$here/dashboard.json")
