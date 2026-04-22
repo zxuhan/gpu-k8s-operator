@@ -1,0 +1,12 @@
+{
+  "name": "gwb-demo-recorder",
+  "private": true,
+  "type": "module",
+  "description": "Playwright recorder for the README hero GIF. Installed via `make demo`.",
+  "scripts": {
+    "record": "node record.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0"
+  }
+}

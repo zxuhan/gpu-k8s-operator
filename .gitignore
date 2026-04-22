@@ -29,8 +29,15 @@ go.work
 # Kubeconfig might contain secrets
 *.kubeconfig
 
-# Bench + chaos harness logs — noisy docker/kubectl output.
+# Bench + chaos harness logs. Noisy docker/kubectl output.
 # The curated artefacts (SUMMARY.md, results.json, status.json,
 # budget.yaml) are committed; the raw logs are not.
 bench-results/**/*.log
 chaos-results/**/*.log
+
+# Demo recorder (Playwright). Deps are restored by `make demo` via
+# `npm install` on first run; intermediate artefacts aren't kept.
+hack/demo/node_modules/
+hack/demo/demo.webm
+hack/demo/.palette.png
+hack/demo/.record/

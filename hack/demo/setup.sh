@@ -1,40 +1,47 @@
 #!/usr/bin/env bash
-# README demo setup — brings a kind cluster to the pre-demo state:
-#   - operator built, loaded, deployed (kustomize, same path as bench.sh)
-#   - demo namespace with an Evict-mode GPUWorkloadBudget applied
-#   - no workload yet; the vhs tape launches it so the viewer sees
-#     consumption ramp on-screen
+# README demo setup. Brings a kind cluster to the pre-demo state:
+#   - operator built, loaded, Helm-deployed with ServiceMonitor
+#   - kube-prometheus-stack installed (scrapes operator metrics)
+#   - Grafana dashboard applied via ConfigMap sidecar
+#   - demo namespace with an AlertOnly GPUWorkloadBudget applied
+#   - Grafana port-forwarded on localhost:3000 so record.mjs can capture it
+#   - no workload yet; orchestrate.sh launches it during the recording
 #
 # Idempotent: re-running against an existing cluster only re-applies the
-# manifests. Deliberately mirrors hack/bench.sh patterns so anything that
-# works for the bench harness works here.
+# manifests.
 #
 # Knobs:
 #   DEMO_KIND_CLUSTER   default: gwb-demo
 #   DEMO_NAMESPACE      default: demo
-#   IMG                 default: controller:demo (non-"latest" so kubelet
-#                       uses the kind-loaded image)
+#   MONITORING_NS       default: monitoring
+#   KPS_RELEASE         default: kps
+#   IMG                 default: controller:demo
 
 set -euo pipefail
 
 : "${KIND:=kind}"
 : "${KUBECTL:=kubectl}"
+: "${HELM:=helm}"
 : "${DEMO_KIND_CLUSTER:=gwb-demo}"
 : "${DEMO_NAMESPACE:=demo}"
+: "${MONITORING_NS:=monitoring}"
+: "${KPS_RELEASE:=kps}"
+: "${OPERATOR_NS:=gpu-k8s-operator-system}"
+: "${OPERATOR_RELEASE:=gwb-operator}"
 : "${IMG:=controller:demo}"
-: "${CERT_MANAGER_VERSION:=v1.15.3}"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing required tool: $1" >&2; exit 1; }; }
-need "$KIND"; need "$KUBECTL"; need docker; need go
+need "$KIND"; need "$KUBECTL"; need "$HELM"; need docker; need go
+need node; need ffmpeg; need curl
 
 log() { printf '[demo-setup %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
 # 1. Kind cluster
 if "$KIND" get clusters 2>/dev/null | grep -Fxq "$DEMO_KIND_CLUSTER"; then
-  log "kind cluster $DEMO_KIND_CLUSTER already exists — reusing"
+  log "kind cluster $DEMO_KIND_CLUSTER exists, reusing"
 else
   log "creating kind cluster $DEMO_KIND_CLUSTER"
   "$KIND" create cluster --name "$DEMO_KIND_CLUSTER"
@@ -45,38 +52,69 @@ log "building + loading operator image $IMG"
 (cd "$root" && make docker-build IMG="$IMG" >/dev/null)
 "$KIND" load docker-image "$IMG" --name "$DEMO_KIND_CLUSTER" >/dev/null
 
-# 3. cert-manager (webhook dependency)
-log "installing cert-manager $CERT_MANAGER_VERSION"
-"$KUBECTL" apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml" >/dev/null
-"$KUBECTL" -n cert-manager rollout status deploy/cert-manager --timeout=180s
-"$KUBECTL" -n cert-manager rollout status deploy/cert-manager-webhook --timeout=180s
-"$KUBECTL" -n cert-manager rollout status deploy/cert-manager-cainjector --timeout=180s
+# 3. Helm repos
+"$HELM" repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
+"$HELM" repo add jetstack https://charts.jetstack.io >/dev/null 2>&1 || true
+"$HELM" repo update >/dev/null
 
-# 4. Install CRDs + deploy operator.
-# `make deploy` runs `kustomize edit set image` which mutates
-# config/manager/kustomization.yaml — restore it via git afterwards so a
-# `make demo` run doesn't leave a dirty working tree.
-log "installing CRDs + operator"
-(cd "$root" && make install deploy IMG="$IMG" >/dev/null)
-if [ -d "$root/.git" ]; then
-  (cd "$root" && git checkout -- config/manager/kustomization.yaml 2>/dev/null || true)
-fi
-"$KUBECTL" -n gpu-k8s-operator-system rollout status \
-  deploy/gpu-k8s-operator-controller-manager --timeout=180s
+# 4. cert-manager (webhook dependency)
+log "installing cert-manager"
+"$HELM" upgrade --install cert-manager jetstack/cert-manager \
+  --namespace cert-manager --create-namespace \
+  --set crds.enabled=true --wait >/dev/null
 
-# 5. Demo namespace + AlertOnly budget.
-# Quota of 0.0005 gpu-hours ≈ 1.8 CPU-seconds so the workload crosses it
-# inside the demo window, but AlertOnly keeps the pods running — that
-# way Scene B of the tape (operator-kill) has a live workload to track,
-# which is what actually proves the stateless-recovery claim.
+# 5. kube-prometheus-stack (Prometheus + Grafana + sidecar). Pin the
+# Grafana admin password so record.mjs can log in with a known value;
+# the cluster is ephemeral and local-only so this is fine for the demo.
+log "installing kube-prometheus-stack ($KPS_RELEASE)"
+"$HELM" upgrade --install "$KPS_RELEASE" prometheus-community/kube-prometheus-stack \
+  --namespace "$MONITORING_NS" --create-namespace \
+  --set prometheus.prometheusSpec.scrapeInterval=5s \
+  --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
+  --set grafana.defaultDashboardsEnabled=false \
+  --set grafana.sidecar.dashboards.enabled=true \
+  --set grafana.sidecar.dashboards.searchNamespace=ALL \
+  --set grafana.adminPassword=prom-operator \
+  --wait >/dev/null
+
+# 6. Operator Helm chart with ServiceMonitor labelled for kps Prometheus
+log "installing operator Helm chart with ServiceMonitor"
+"$HELM" upgrade --install "$OPERATOR_RELEASE" "$root/deploy/helm/gwb-operator" \
+  --namespace "$OPERATOR_NS" --create-namespace \
+  --set fullnameOverride="$OPERATOR_RELEASE" \
+  --set image.repository=controller \
+  --set image.tag=demo \
+  --set image.pullPolicy=IfNotPresent \
+  --set metrics.serviceMonitor.enabled=true \
+  --set "metrics.serviceMonitor.labels.release=$KPS_RELEASE" \
+  --wait >/dev/null
+
+"$KUBECTL" -n "$OPERATOR_NS" rollout status \
+  "deploy/$OPERATOR_RELEASE" --timeout=180s
+
+# 7. Dashboard ConfigMap (sidecar auto-loads when label grafana_dashboard=1)
+log "installing Grafana dashboard ConfigMap"
+dash_body=$(sed 's/^/    /' "$here/dashboard.json")
+cat <<EOF | "$KUBECTL" apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gwb-demo-dashboard
+  namespace: $MONITORING_NS
+  labels:
+    grafana_dashboard: "1"
+data:
+  gwb-demo.json: |
+$dash_body
+EOF
+
+# 8. Demo namespace + AlertOnly budget.
+# Quota ≈ 1.8 CPU-seconds so the workload crosses it inside the demo
+# window, but AlertOnly keeps the pods running so Scene B (operator kill)
+# has a live workload to re-track.
 log "creating namespace $DEMO_NAMESPACE + demo budget"
 "$KUBECTL" create ns "$DEMO_NAMESPACE" --dry-run=client -o yaml \
   | "$KUBECTL" apply -f - >/dev/null
-
-# The webhook can race rollout-status: kubelet marks the operator pod
-# Ready before its TLS listener accepts connections (cert-manager cert
-# is mounted seconds after the pod starts). Retry the apply until the
-# webhook answers.
 budget_yaml=$(cat <<EOF
 apiVersion: budget.zxuhan.dev/v1alpha1
 kind: GPUWorkloadBudget
@@ -98,19 +136,44 @@ EOF
 )
 for i in 1 2 3 4 5 6 7 8 9 10; do
   if printf '%s\n' "$budget_yaml" | "$KUBECTL" apply -f - >/dev/null 2>&1; then
-    log "budget applied (attempt $i)"
-    break
+    log "budget applied (attempt $i)"; break
   fi
-  if (( i == 10 )); then
-    log "budget apply failed after $i attempts"; exit 1
-  fi
+  (( i == 10 )) && { log "budget apply failed"; exit 1; }
   sleep 3
 done
-
 "$KUBECTL" -n "$DEMO_NAMESPACE" wait gwb/demo \
-  --for=condition=Ready --timeout=30s || log "budget never reached Ready — continuing"
+  --for=condition=Ready --timeout=30s || log "budget never reached Ready, continuing"
 
-# 6. Build the workload generator once so the tape doesn't have to
+# 9. Build the workload generator
 (cd "$root" && make workload-generator >/dev/null)
 
-log "ready — run 'vhs hack/demo/demo.tape' next"
+# 9b. Playwright (for record.mjs). Install into hack/demo/node_modules and
+# fetch the chromium binary once. Skip if already present.
+if [ ! -d "$here/node_modules/playwright" ]; then
+  log "installing playwright into hack/demo/node_modules"
+  (cd "$here" && npm install --silent --no-audit --no-fund)
+fi
+if ! (cd "$here" && npx --no playwright install --dry-run chromium 2>/dev/null | grep -q "is already installed"); then
+  log "downloading chromium for playwright (~150MB, one-time)"
+  (cd "$here" && npx --no playwright install chromium)
+fi
+
+# 10. Port-forward Grafana. Stash PID so teardown can clean it up.
+log "port-forwarding Grafana on :3000"
+pkill -f "port-forward.*$KPS_RELEASE-grafana" 2>/dev/null || true
+"$KUBECTL" -n "$MONITORING_NS" port-forward "svc/$KPS_RELEASE-grafana" 3000:80 \
+  >/tmp/gwb-demo-pf.log 2>&1 &
+echo $! > /tmp/gwb-demo-pf.pid
+
+for i in $(seq 1 30); do
+  if curl -sf -o /dev/null "http://localhost:3000/login"; then
+    log "Grafana ready on :3000"; break
+  fi
+  (( i == 30 )) && { log "Grafana never answered on :3000"; exit 1; }
+  sleep 2
+done
+
+# Give the dashboards sidecar a moment to pick up the ConfigMap.
+sleep 15
+
+log "ready, run 'node hack/demo/record.mjs' next"
