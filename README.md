@@ -1,45 +1,91 @@
-# gpu-k8s-operator
+<h1 align="center">gpu-k8s-operator</h1>
 
-A namespaced Kubernetes operator that tracks cumulative GPU-hour
-consumption for pods matching a label selector against a rolling-window
-quota, and enforces that quota via eviction, pause annotations, or
-alert-only mode.
+<p align="center">
+  <img alt="Go" src="https://img.shields.io/badge/Go-1.23%2B-00ADD8?logo=go&logoColor=white" />
+  <img alt="Kubernetes" src="https://img.shields.io/badge/Kubernetes-1.31%2B-326ce5?logo=kubernetes&logoColor=white" />
+  <img alt="Kubebuilder" src="https://img.shields.io/badge/Kubebuilder-v4-326ce5" />
+  <img alt="Helm" src="https://img.shields.io/badge/Helm-chart-0F1689?logo=helm&logoColor=white" />
+  <a href="https://github.com/zxuhan/gpu-k8s-operator/actions/workflows/test.yml"><img alt="Tests" src="https://github.com/zxuhan/gpu-k8s-operator/actions/workflows/test.yml/badge.svg" /></a>
+  <a href="https://github.com/zxuhan/gpu-k8s-operator/actions/workflows/test-e2e.yml"><img alt="E2E" src="https://github.com/zxuhan/gpu-k8s-operator/actions/workflows/test-e2e.yml/badge.svg" /></a>
+</p>
 
-![demo](docs/media/demo.gif)
+<p align="center">
+A Kubernetes operator for rolling-window GPU-hour budgets. Stateless accounting recomputes from the live API view every reconcile; a mid-flight operator kill reconverges to 0.996 accuracy on kind, with zero pods lost from the informer. Enforcement via eviction, pause, or alert.
+</p>
 
-*Live Grafana panels driven by the operator's Prometheus metrics.
-The gauge climbs past the quota line as 8 pods run against a quota
-deliberately crossable in seconds. Midway through, the operator pod is
-deleted; the pods-tracked stat holds at 8, showing state is rebuilt
-from the API-server view on restart rather than restored from a cache.
-Regenerate with `make demo`.*
+<p align="center">
+  <img alt="demo" src="docs/media/demo.gif" width="720" />
+</p>
 
-## Why this matters
+<p align="center"><sub><i>Grafana panels driven by the operator's Prometheus metrics. The gauge climbs past the quota line as 8 pods run against a tight quota. Midway through, the operator pod is killed; the tracked-pods stat holds at 8 because state is rebuilt from the API view on restart, not from a cache.</i></sub></p>
 
-Cumulative GPU-hour budgets are the quota primitive AI-cloud platforms
-use to keep shared fleets fair and predictable: teams get an allowance
-per window, workloads stay fungible across nodes, and billing stays
-out of the hot path. This operator is a self-contained implementation
-of that control plane: rolling-window accounting, grace-period
-enforcement, stateless restart recovery, all driven by a single CRD
-(`GPUWorkloadBudget`, group `budget.zxuhan.dev`, version `v1alpha1`).
-Accounting is derived from the API-server view on every reconcile, so
-a restart recovers from cluster state rather than from a cache;
-[docs/accounting-model.md](docs/accounting-model.md) explains the
-bounded-error guarantees.
+## Results
 
-When `nvidia.com/gpu` is absent (e.g. a kind cluster) the accounting
-engine falls back to scaled CPU-second counting: set
-`spec.gpuResourceName: cpu` and the same control loop drives against
-`resource.Quantity` CPU requests. The e2e and bench suites both rely
-on this path.
+Measured on a kind cluster (M-series laptop, 2026-04-20). Raw outputs are checked in under [`bench-results/2026-04-20/`](bench-results/2026-04-20/) and [`chaos-results/2026-04-20/`](chaos-results/2026-04-20/); the harness owns the numbers and the README quotes them.
+
+### Scenario
+
+| Parameter | Steady-state bench | Chaos run |
+|---|---|---|
+| pods | 50 | 50 |
+| arrival rate | 10 pods/s | 10 pods/s |
+| per-pod runtime | 30s | 60s |
+| resource per pod | 0.1 CPU (simulated GPU) | 0.1 CPU |
+| snapshots | t = 45s | t = 15s, t = 120s |
+| event | none | operator pod deleted between snapshots |
+| cluster | kind on Docker | kind on Docker |
+
+### Measurements
+
+| Scenario | Tracked pods | Reported GPU-hours | Expected | Accuracy | Delta |
+|---|---|---|---|---|---|
+| Steady-state bench | 50 / 50 | 0.04000 | 0.04167 | **0.960** | -6 pod-seconds |
+| Chaos, pre-kill snapshot | 50 / 50 | 0.01200 | 0.01743 | 0.688 | -19 pod-seconds |
+| Chaos, post-recovery snapshot | 50 / 50 | 0.08300 | 0.08333 | **0.996** | -1 pod-second |
+
+![Restart recovery](docs/media/restart-recovery.svg)
+
+### Key observations
+
+- **`tracked_pods` stays at 50/50 across the operator kill.** The replacement pod's informer rebuilds from the API-server view and re-observes every pod. Nothing is replayed from a cache because nothing was ever cached.
+- **Post-recovery accuracy is on par with the clean baseline.** 0.996 after the kill matches the 0.960 steady-state run to within rounding. The chaos event did not move the accuracy needle.
+- **The pre-kill 0.688 is workload-freshness, not chaos damage.** The first chaos snapshot lands at t=15s, one reconcile cadence after a 50-pod workload starts arriving. Two cadences later the accounting converges; the operator kill happens in between.
+- **The sub-second delta is kubelet, not the operator.** Steady-state's -6 pod-seconds is the kubelet start-up lag between pod create and `state.running.startedAt`. The engine counts from `startedAt`, so image-pull and scheduling slop never hit the quota.
+
+### Why the numbers hold
+
+1. **Accounting is derived, not stored.** `internal/accounting/` is a pure-Go function: given a pod set with `(Start, End, GPUs)`, compute consumed GPU-hours. No in-memory ledger, no rolling counter, nothing to lose on restart or drift over weeks.
+2. **`.status.consumedGpuHours` is overwritten, not accumulated.** Every reconcile writes the freshly computed value. A bug in one reconcile self-heals on the next.
+3. **The reconciler does no math.** It translates pods to accounting input (see [`internal/controller/pod_conversion.go`](internal/controller/pod_conversion.go)) and writes status. All numeric logic lives in `internal/accounting/`, unit-tested to nanosecond precision.
+4. **GPU-less clusters use the same code path.** Set `spec.gpuResourceName: cpu` and the engine treats fractional CPU as fractional GPU. The e2e and bench suites both rely on this; see [`docs/accounting-model.md`](docs/accounting-model.md) for the bounded-error guarantee when kubelet GC'es a pod the operator never saw.
+
+## Architecture
+
+![Architecture](docs/media/architecture.svg)
+
+Three packages, each independently testable:
+
+- **`internal/accounting/`** is pure Go, k8s-free. Given a pod set with `(Start, End, GPUs)`, returns consumed GPU-hours, clamped remaining, and an over-quota flag.
+- **`internal/controller/`** is the reconciler. It translates `Pod` objects to accounting input, patches `.status`, and toggles `Ready` / `QuotaExceeded` / `Degraded` conditions.
+- **`internal/enforcement/`** dispatches one of three actions per `spec.enforcement.action`: `Evict` submits `policy/v1.Eviction`, `Pause` writes an annotation, `AlertOnly` records a Kubernetes Event. Grace periods are wall-clock.
+
+The validating webhook (`internal/webhook/v1alpha1/`) rejects empty selectors, non-positive quotas, and unknown enforcement actions at admission. Validating-only by design; see [`docs/limitations.md`](docs/limitations.md).
+
+Prometheus metrics on a TokenReview-guarded HTTPS endpoint, plus controller-runtime's default reconcile-latency and workqueue series. Enable the Helm ServiceMonitor to scrape from `kube-prometheus-stack`.
+
+| Metric | Meaning |
+|---|---|
+| `gwb_consumed_gpu_hours` | current `.status.consumedGpuHours` |
+| `gwb_remaining_gpu_hours` | `quota - consumed`, clamped at zero |
+| `gwb_enforcement_actions_total` | counter, incremented per action fired |
+| `gwb_tracked_pods` | pods matched by the selector at last reconcile |
+| `gwb_accounting_accuracy_ratio` | registered but always zero; the operator does not know ground truth, the bench harness writes the ratio externally |
 
 ## Quickstart
 
-### Install with Helm
+Prerequisites: a Kubernetes cluster, `helm`, and `cert-manager` (the webhook needs TLS).
 
 ```sh
-# cert-manager is a prerequisite for the validating webhook.
 helm upgrade --install cert-manager jetstack/cert-manager \
   --namespace cert-manager --create-namespace \
   --set crds.enabled=true
@@ -48,7 +94,7 @@ helm upgrade --install gwb-operator ./deploy/helm/gwb-operator \
   --namespace gpu-k8s-operator-system --create-namespace
 ```
 
-### Create a budget
+Create a budget:
 
 ```yaml
 apiVersion: budget.zxuhan.dev/v1alpha1
@@ -68,182 +114,60 @@ spec:
     gracePeriodSeconds: 60
 ```
 
-Then watch:
+Watch it move:
 
 ```sh
 kubectl get gwb team-a -w
 ```
 
-## How it works
+For air-gapped clusters, `make build-installer` emits a single-file `dist/install.yaml` equivalent to the Helm chart.
 
-```mermaid
-flowchart LR
-    P[Pod events<br/>API server] --> R[Reconciler<br/>internal/controller]
-    R --> A[Accounting engine<br/>internal/accounting<br/>pure Go, k8s-free]
-    A --> R
-    R --> S[.status write<br/>Ready / QuotaExceeded /<br/>Degraded conditions]
-    R --> D[Enforcement dispatcher<br/>internal/enforcement]
-    D --> E1[Evict<br/>policy/v1.Eviction]
-    D --> E2[Pause<br/>annotation stamp]
-    D --> E3[AlertOnly<br/>Event only]
-    R --> M[Prometheus metrics<br/>consumed / remaining /<br/>tracked_pods]
+## Project structure
+
+```
+.
+├── api/v1alpha1/             GPUWorkloadBudget types and validation markers
+├── cmd/main.go               manager entry point
+├── config/                   generated CRD, RBAC, webhook, manager manifests
+├── internal/
+│   ├── accounting/           pure-Go budget math
+│   ├── controller/           reconciler and pod-status conversion
+│   ├── enforcement/          Evict / Pause / AlertOnly handlers
+│   └── webhook/v1alpha1/     validating webhook
+├── test/
+│   ├── e2e/                  Ginkgo end-to-end suite
+│   ├── bench/                accuracy harness and gwb-bench CLI
+│   └── workload-generator/   gwb-workload CLI
+├── hack/                     bench.sh, chaos.sh, demo/, helm-lint.sh, bench-stack/
+├── deploy/
+│   ├── helm/gwb-operator/    Helm chart
+│   └── aks/                  Bicep template and parameters for AKS
+└── docs/
+    ├── diagrams/             D2 sources for the architecture diagram
+    └── media/                rendered SVGs and demo.gif
 ```
 
-Three packages, separated so each is independently testable:
+## Reproduce
 
-- **`internal/accounting/`**: pure Go, k8s-free. Given a set of pods
-  with `(Start, End, GPUs)`, computes `consumedGpuHours`, clamps
-  `remainingGpuHours` at zero, and flags `over`. Unit-tested to ~ns
-  precision.
-
-- **`internal/controller/`**: the reconciler. Translates
-  k8s `Pod` objects to accounting input (see `pod_conversion.go` for
-  the `earliestContainerStart` / `latestContainerFinish` rules),
-  writes `.status`, and patches `Ready`/`QuotaExceeded`/`Degraded`
-  conditions.
-
-- **`internal/enforcement/`**: one implementation per
-  `spec.enforcement.action`: `Evict` submits `policy/v1.Eviction`,
-  `Pause` writes an annotation, `AlertOnly` emits an event and records
-  the action in `lastEnforcementAt`. Grace periods are wall-clock.
-
-The validating webhook rejects empty selectors, zero quotas, and
-unknown enforcement actions at admission time so the controller never
-sees malformed state. It is validating only. See
-[docs/limitations.md](docs/limitations.md#webhook) for why.
-
-## Metrics
-
-Exposed on an HTTPS endpoint guarded by Kubernetes TokenReview
-(enable the Helm ServiceMonitor to scrape from kube-prometheus-stack):
-
-| Metric | Meaning |
-|---|---|
-| `gwb_consumed_gpu_hours{namespace, name}` | current `.status.consumedGpuHours` |
-| `gwb_remaining_gpu_hours{namespace, name}` | `quota − consumed`, clamped |
-| `gwb_enforcement_actions_total{action, namespace, name}` | counter incremented per action fired |
-| `gwb_tracked_pods{namespace, name}` | pods matched by selector at last reconcile |
-| `gwb_accounting_accuracy_ratio{namespace, name}` | registered, currently always 0. The operator doesn't know ground truth; the bench harness computes this externally and writes it to `bench-results/…/results.json` |
-
-Controller-runtime's default metrics (reconcile latency, workqueue
-depth, etc.) are served alongside.
-
-## Benchmarks
+To reproduce the numbers in the Results section on your own laptop you need Go 1.23+, Docker, `kubectl`, and `kind`.
 
 ```sh
-make bench    # one scenario → bench-results/YYYY-MM-DD/SUMMARY.md
-make chaos    # restart-correctness scenario → chaos-results/YYYY-MM-DD/SUMMARY.md
+make test       # unit and envtest suites
+make test-e2e   # Ginkgo against a fresh kind cluster
+make bench      # accuracy run, writes bench-results/YYYY-MM-DD/SUMMARY.md
+make chaos      # restart-correctness run, writes chaos-results/YYYY-MM-DD/SUMMARY.md
 ```
 
-The accuracy formula and the reason benches run on kind are in
-[docs/benchmark-methodology.md](docs/benchmark-methodology.md).
+Scenario knobs for `make bench` (count, rate, runtime, gpus, observe-window) and the accuracy formula live in [`docs/benchmark-methodology.md`](docs/benchmark-methodology.md) and at the top of `hack/bench.sh`.
 
-### Measured numbers (kind, M-series laptop, 2026-04-20)
+For Azure (AKS), [`deploy/aks/`](deploy/aks/) ships a Bicep template plus `parameters.example.json` that provisions an AKS cluster (1.31, 2x B2s, Azure CNI overlay) and a Basic ACR. The workflow at [`.github/workflows/aks-deploy.yml`](.github/workflows/aks-deploy.yml) builds the operator image, pushes it to ACR, and runs `helm upgrade --install` against the cluster. Intended for a student subscription; trade-offs (no GPU node pool, no monitoring addon, public API server) are in [`deploy/aks/README.md`](deploy/aks/README.md). Required repository secrets: `AZURE_CREDENTIALS`, `AZURE_RESOURCE_GROUP`, `AKS_CLUSTER_NAME`, `ACR_NAME`.
 
-Recorded in-repo under [`bench-results/2026-04-20/`](bench-results/2026-04-20/)
-and [`chaos-results/2026-04-20/`](chaos-results/2026-04-20/). Regenerate
-any time with `make bench` / `make chaos`. The harness owns the
-numbers, the README just quotes them.
+## Limitations
 
-**Steady-state accuracy.** 50 busybox pods at 10/s, 30s runtime each,
-0.1 CPU "GPU" per pod, snapshot at t=45s (all pods terminated):
+Alpha. Full list at [`docs/limitations.md`](docs/limitations.md). The short version:
 
-| Metric | Value |
-|---|---|
-| reported GPU-hours | 0.04000 |
-| expected GPU-hours | 0.04167 |
-| **accuracy ratio** | **0.96** |
-| delta | −6 pod-seconds |
-| tracked pods | 50 |
-
-The −6-pod-second delta is the kubelet start-up lag: the accounting
-engine counts from `state.running.startedAt`, which kubelet stamps a
-fraction of a second after pod-create. See
-[docs/accounting-model.md](docs/accounting-model.md) for the formula.
-
-**Restart correctness.** Same workload, runtime bumped to 60s so pods
-are still Running when we snapshot. Operator pod deleted at t=15s;
-post snapshot at t=120s (`CHAOS_POST_SECONDS=120`):
-
-| Phase | Elapsed | Tracked pods | Reported | Expected | Accuracy |
-|---|---|---|---|---|---|
-| pre-restart  | 15s  | **50 / 50** | 0.0120 | 0.0174 | 0.69 |
-| post-restart | 120s | **50 / 50** | 0.0830 | 0.0833 | **0.996** |
-
-The headline is `tracked_pods = 50` on both sides of the restart: when
-the new operator pod comes up, controller-runtime's informer rebuilds
-from the API-server view and every pod is re-observed. No state was
-persisted and none was lost. The pre-restart 0.69 is reconcile cadence
-against a fresh workload (first snapshot lands one reconcile after
-workload launch). Once the operator has had a few ticks to re-sum
-everyone's elapsed runtime, the post-restart reading converges to
-0.996, essentially the same accuracy as `make bench`, which says the
-restart cost nothing.
-
-## Development
-
-Prerequisites: Go 1.23+, Docker, kubectl, kind.
-
-```sh
-make test                # unit + envtest suites
-make test-e2e            # Ginkgo against a fresh kind cluster
-make lint                # golangci-lint v2
-make manifests generate  # regen CRD + deepcopy after API changes
-make helm-lint           # lint the Helm chart (requires helm)
-make demo                # regenerate docs/media/demo.gif (requires helm, node, ffmpeg)
-```
-
-The `config/` directory holds the kustomize sources; `make
-build-installer` emits a single-file `dist/install.yaml` that's
-functionally equivalent to the Helm chart for air-gapped clusters.
-
-## Run on Azure (AKS)
-
-The `deploy/aks/` directory ships a Bicep template + `parameters.example.json`
-that provision an AKS cluster (1.31, 2× B2s, Azure CNI overlay) and a
-Basic ACR with `adminUserEnabled: false` and an AcrPull role assignment
-to the cluster's kubelet identity. `.github/workflows/aks-deploy.yml`
-then builds the operator image on every push, pushes it to ACR, and
-runs `helm upgrade --install` against the cluster via
-`azure/setup-helm`. Intended for a student subscription. The
-trade-offs (no GPU node pool, no monitoring addon, public API server)
-are documented in [`deploy/aks/README.md`](deploy/aks/README.md).
-
-Required repo secrets: `AZURE_CREDENTIALS`, `AZURE_RESOURCE_GROUP`,
-`AKS_CLUSTER_NAME`, `ACR_NAME`.
-
-## Repository layout
-
-```
-api/v1alpha1/             GPUWorkloadBudget types + validation markers
-cmd/main.go               Manager entry point
-config/                   Generated CRD, RBAC, webhook, manager manifests
-internal/accounting/      Pure-Go budget math
-internal/controller/      Reconciler + pod-status conversion
-internal/enforcement/     Evict / Pause / AlertOnly handlers
-internal/webhook/         Validating webhook
-test/e2e/                 Ginkgo e2e suite
-test/bench/               Accuracy harness + gwb-bench CLI
-test/workload-generator/  gwb-workload CLI
-hack/                     bench.sh, chaos.sh, demo/, helm-lint.sh, bench-stack/
-deploy/helm/gwb-operator/ Helm chart
-deploy/aks/               Bicep + parameters for AKS
-docs/                     accounting-model, benchmark-methodology, limitations
-docs/media/               demo.gif (regenerable via `make demo`)
-```
-
-## Status and limitations
-
-Alpha. Full list of known issues and scope boundaries:
-[docs/limitations.md](docs/limitations.md). The TL;DR:
-
-- Single-budget bench only; overlapping selectors work but aren't
-  measured.
-- Enforcement respects PDBs: a protected workload can stay
-  over-quota until the PDB changes.
-- Benches run on kind with simulated CPU-as-GPU; real NVIDIA
-  device-plugin behaviour is not exercised.
-
-## License
-
-Apache 2.0. See [`LICENSE`](LICENSE).
+- **Kind, not production.** All numbers are from a kind cluster with `gpuResourceName: cpu` and busybox sleepers. Real NVIDIA device-plugin behaviour is not exercised.
+- **Single-budget bench.** Overlapping selectors work in code but are not measured.
+- **PDB-respecting enforcement.** Eviction goes through `policy/v1.Eviction`, so a workload behind a zero-disruption PDB stays over-quota until the PDB changes. Documented, not a bug.
+- **No long-running cluster proof.** Tens of minutes under bench and chaos, not weeks under production load. The stateless design bounds the in-memory leak surface, but that is an argument rather than an observation.
+- **Operator-down accounting loss is bounded by kubelet GC.** Pods that terminate and are GC'd from the API server while the operator is offline contribute zero post-restart. Bounded error in [`docs/accounting-model.md`](docs/accounting-model.md).

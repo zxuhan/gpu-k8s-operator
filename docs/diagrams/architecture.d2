@@ -1,0 +1,65 @@
+# gpu-k8s-operator data flow.
+
+direction: right
+
+api: "Kubernetes API server" {
+  shape: cylinder
+  style.font-size: 28
+  style.fill: "#eff6ff"
+  style.stroke: "#1d4ed8"
+}
+
+reconciler: "Reconciler" {
+  shape: rectangle
+  style.font-size: 30
+  style.bold: true
+  style.fill: "#ffffff"
+  style.stroke: "#0f172a"
+}
+
+accounting: "Accounting engine\n(pure Go, k8s-free)" {
+  shape: rectangle
+  style.font-size: 28
+  style.fill: "#fef3c7"
+  style.stroke: "#b45309"
+}
+
+status: ".status conditions\nReady / QuotaExceeded / Degraded" {
+  shape: page
+  style.font-size: 26
+  style.fill: "#f0fdf4"
+  style.stroke: "#15803d"
+}
+
+enforcement: "Enforcement\nEvict / Pause / AlertOnly" {
+  shape: rectangle
+  style.font-size: 28
+  style.fill: "#fef2f2"
+  style.stroke: "#b91c1c"
+}
+
+metrics: "Prometheus metrics" {
+  shape: hexagon
+  style.font-size: 28
+  style.fill: "#ecfeff"
+  style.stroke: "#0e7490"
+}
+
+api -> reconciler: "pod + GWB watches" {
+  style.font-size: 22
+}
+reconciler -> accounting: "pod set" {
+  style.font-size: 22
+}
+accounting -> reconciler: "consumed hours" {
+  style.font-size: 22
+}
+reconciler -> status: "patch" {
+  style.font-size: 22
+}
+reconciler -> enforcement: "over-quota" {
+  style.font-size: 22
+}
+reconciler -> metrics: "scrape" {
+  style.font-size: 22
+}

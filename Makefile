@@ -131,20 +131,25 @@ helm-lint: ## Lint + dry-render the deploy/helm/gwb-operator chart. Requires hel
 .PHONY: demo
 demo: build workload-generator ## Regenerate the README hero GIF (requires docker, kind, helm, node, ffmpeg).
 	bash hack/demo/setup.sh
-	cd hack/demo && RECORD_SECONDS=60 node record.mjs
-	ffmpeg -y -ss 1.5 -t 58 -i hack/demo/demo.webm -vf "fps=8,scale=720:-1:flags=lanczos,palettegen=max_colors=96" hack/demo/.palette.png
-	ffmpeg -y -ss 1.5 -t 58 -i hack/demo/demo.webm -i hack/demo/.palette.png -lavfi "fps=8,scale=720:-1:flags=lanczos [v]; [v][1:v] paletteuse=dither=bayer:bayer_scale=5" -loop 0 docs/media/demo.gif
+	cd hack/demo && RECORD_SECONDS=45 node record.mjs
+	ffmpeg -y -ss 1.5 -t 42 -i hack/demo/demo.webm -vf "fps=8,scale=1080:-1:flags=lanczos,palettegen=max_colors=128" hack/demo/.palette.png
+	ffmpeg -y -ss 1.5 -t 42 -i hack/demo/demo.webm -i hack/demo/.palette.png -lavfi "fps=8,scale=1080:-1:flags=lanczos [v]; [v][1:v] paletteuse=dither=bayer:bayer_scale=5" -loop 0 docs/media/demo.gif
 	rm -f hack/demo/demo.webm hack/demo/.palette.png
 	rm -rf hack/demo/.record
 	bash hack/demo/teardown.sh
 
 .PHONY: demo-record
 demo-record: ## Re-record demo.gif only. Assumes 'make demo' already brought a cluster up and left it.
-	cd hack/demo && RECORD_SECONDS=60 node record.mjs
-	ffmpeg -y -ss 1.5 -t 58 -i hack/demo/demo.webm -vf "fps=8,scale=720:-1:flags=lanczos,palettegen=max_colors=96" hack/demo/.palette.png
-	ffmpeg -y -ss 1.5 -t 58 -i hack/demo/demo.webm -i hack/demo/.palette.png -lavfi "fps=8,scale=720:-1:flags=lanczos [v]; [v][1:v] paletteuse=dither=bayer:bayer_scale=5" -loop 0 docs/media/demo.gif
+	cd hack/demo && RECORD_SECONDS=45 node record.mjs
+	ffmpeg -y -ss 1.5 -t 42 -i hack/demo/demo.webm -vf "fps=8,scale=1080:-1:flags=lanczos,palettegen=max_colors=128" hack/demo/.palette.png
+	ffmpeg -y -ss 1.5 -t 42 -i hack/demo/demo.webm -i hack/demo/.palette.png -lavfi "fps=8,scale=1080:-1:flags=lanczos [v]; [v][1:v] paletteuse=dither=bayer:bayer_scale=5" -loop 0 docs/media/demo.gif
 	rm -f hack/demo/demo.webm hack/demo/.palette.png
 	rm -rf hack/demo/.record
+
+.PHONY: diagrams
+diagrams: ## Render D2 sources under docs/diagrams/ into docs/media/. Requires d2.
+	@command -v d2 >/dev/null 2>&1 || { echo "d2 not installed (brew install d2)"; exit 1; }
+	d2 --layout=dagre --pad=20 docs/diagrams/architecture.d2 docs/media/architecture.svg
 
 ##@ Build
 

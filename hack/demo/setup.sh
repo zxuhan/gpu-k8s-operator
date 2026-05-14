@@ -86,11 +86,21 @@ log "installing operator Helm chart with ServiceMonitor"
   --set image.tag=demo \
   --set image.pullPolicy=IfNotPresent \
   --set metrics.serviceMonitor.enabled=true \
+  --set metrics.serviceMonitor.interval=5s \
+  --set metrics.serviceMonitor.scrapeTimeout=4s \
   --set "metrics.serviceMonitor.labels.release=$KPS_RELEASE" \
   --wait >/dev/null
 
 "$KUBECTL" -n "$OPERATOR_NS" rollout status \
   "deploy/$OPERATOR_RELEASE" --timeout=180s
+
+# kps's prometheus-operator sometimes misses the operator ServiceMonitor on
+# its first reconcile pass (the SM is created right after kps comes up, and
+# the informer occasionally drops the event). Touching a label forces a
+# resync so the SM lands in Prometheus's scrape config. Without this the
+# Grafana panels show "No data" for the first few minutes of the demo.
+"$KUBECTL" -n "$OPERATOR_NS" label servicemonitor "$OPERATOR_RELEASE" \
+  "demo.gwb.zxuhan.dev/force-resync=$(date +%s)" --overwrite >/dev/null || true
 
 # 6b. The operator's /metrics endpoint requires callers to have the
 # 'get /metrics' non-resource URL right. The chart binds that to the
